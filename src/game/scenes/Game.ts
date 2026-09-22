@@ -1,4 +1,4 @@
-import { Scene } from 'phaser';
+import { Scene, Input } from 'phaser';
 
 const MOVE_SPEED = 200;
 const JUMP_VELOCITY = -450;
@@ -46,7 +46,7 @@ export class Game extends Scene
 
         // blocked.down / touching.down is true only while standing on something - stops mid-air jumps.
         const onGround = body.blocked.down || body.touching.down;
-        if (onGround && Phaser.Input.Keyboard.JustDown(this.cursors.up)) {
+        if (onGround && Input.Keyboard.JustDown(this.cursors.up)) {
             body.setVelocityY(JUMP_VELOCITY);
         }
     }
