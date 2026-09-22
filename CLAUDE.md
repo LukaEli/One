@@ -68,7 +68,7 @@ Backend, accounts, character select, shop, shards, gems, energy, loot, currencie
 ## Build order
 1. Scaffold runs; empty scene with a player rectangle that moves and jumps
 2. Platform room + camera
-3. Auto-fire at nearest enemy when standing still
+3. Auto-fire at nearest enemy constantly, including while moving and jumping
 4. One enemy type with health, damage, death
 5. Battle XP bar that banks a skill pick on fill (no combat pause, counter/icon shown, leftover XP carries over) + debug menu selector to start a run as Baby/Teen/Adult, applying that life stage's hitbox/speed/damage for the run
 6. Room-clear skill-pick screen that works through banked picks one at a time + `PlayerStats` modifier system
