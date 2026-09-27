@@ -12,7 +12,7 @@ const BULLET_SPEED = 500;
 const ENEMY_BULLET_SPEED = 260;
 const PLAYER_MAX_HEALTH = 5;
 const PLAYER_DAMAGE_COOLDOWN_MS = 600;
-const ENEMY_MAX_HEALTH = 3;
+const ENEMY_MAX_HEALTH = 5;
 const ENEMY_DAMAGE = 1;
 
 const ENEMY_COLOR = 0xd94f4f;
@@ -100,7 +100,7 @@ export class Game extends Scene
     player: Phaser.GameObjects.Rectangle;
     cursors: MovementKeys;
     playerHealth: number = PLAYER_MAX_HEALTH;
-    playerDamageCooldown: number = 0;
+    contactDamageCooldown: number = 0;
     playerHealthBar: Phaser.GameObjects.Graphics;
     playerHealthText: Phaser.GameObjects.Text;
     uiContainer: Phaser.GameObjects.Container;
@@ -125,7 +125,7 @@ export class Game extends Scene
     create ()
     {
         this.playerHealth = PLAYER_MAX_HEALTH;
-        this.playerDamageCooldown = 0;
+        this.contactDamageCooldown = 0;
         this.playerXp = 0;
         this.playerCoins = 0;
         this.enemies = [];
@@ -266,7 +266,7 @@ export class Game extends Scene
     update (_time: number, delta: number)
     {
         const body = this.player.body as Phaser.Physics.Arcade.Body;
-        this.playerDamageCooldown = Math.max(0, this.playerDamageCooldown - delta);
+        this.contactDamageCooldown = Math.max(0, this.contactDamageCooldown - delta);
 
         const leftHeld = this.cursors.left?.isDown || this.cursors.arrowLeft?.isDown;
         const rightHeld = this.cursors.right?.isDown || this.cursors.arrowRight?.isDown;
@@ -410,7 +410,7 @@ export class Game extends Scene
 
     handleEnemyContactDamage ()
     {
-        if (this.playerDamageCooldown > 0) {
+        if (this.contactDamageCooldown > 0) {
             return;
         }
 
@@ -419,9 +419,10 @@ export class Game extends Scene
             const enemyBounds = enemy.body.getBounds();
             if (Geom.Intersects.RectangleToRectangle(playerBounds, enemyBounds)) {
                 this.playerHealth = Math.max(0, this.playerHealth - enemy.damage);
-                this.playerDamageCooldown = PLAYER_DAMAGE_COOLDOWN_MS;
+                this.contactDamageCooldown = PLAYER_DAMAGE_COOLDOWN_MS;
                 this.player.setFillStyle(0xff6666);
                 this.time.delayedCall(120, () => this.player.setFillStyle(0xe0e0e0));
+                this.updatePlayerHealthBar();
                 this.checkPlayerDefeat();
                 return;
             }
@@ -622,7 +623,6 @@ export class Game extends Scene
             if (outOfBounds || hitPlatform || hitPlayer) {
                 if (hitPlayer) {
                     this.playerHealth = Math.max(0, this.playerHealth - bullet.damage);
-                    this.playerDamageCooldown = PLAYER_DAMAGE_COOLDOWN_MS;
                     this.player.setFillStyle(0xff6666);
                     this.time.delayedCall(120, () => this.player.setFillStyle(0xe0e0e0));
                     this.checkPlayerDefeat();
