@@ -1,4 +1,4 @@
-import { Scene, Input } from 'phaser';
+import { Scene, Input, Geom } from 'phaser';
 
 const MOVE_SPEED = 200;
 const JUMP_VELOCITY = -450;
@@ -9,6 +9,11 @@ const ROOM_HEIGHT = 768;
 
 const FIRE_RATE_MS = 500; // how often the player auto-fires, regardless of input
 const BULLET_SPEED = 500;
+const ENEMY_BULLET_SPEED = 260;
+const PLAYER_MAX_HEALTH = 5;
+const PLAYER_DAMAGE_COOLDOWN_MS = 600;
+const ENEMY_MAX_HEALTH = 3;
+const ENEMY_DAMAGE = 1;
 
 const ENEMY_COLOR = 0xd94f4f;
 const TARGET_COLOR = 0xffa53c; // highlight for whichever enemy is currently being aimed at
@@ -18,6 +23,23 @@ type Bullet = {
     shape: Phaser.GameObjects.Arc;
     velocityX: number;
     velocityY: number;
+    owner: 'player' | 'enemy';
+    damage: number;
+};
+
+type Enemy = {
+    body: Phaser.GameObjects.Rectangle;
+    health: number;
+    maxHealth: number;
+    damage: number;
+    fireCooldown: number;
+    healthBar: Phaser.GameObjects.Graphics;
+    healthText: Phaser.GameObjects.Text;
+};
+
+type DamagePopup = {
+    text: Phaser.GameObjects.Text;
+    ttl: number;
 };
 
 function distanceSquared (ax: number, ay: number, bx: number, by: number): number
@@ -27,18 +49,34 @@ function distanceSquared (ax: number, ay: number, bx: number, by: number): numbe
     return dx * dx + dy * dy;
 }
 
+type MovementKeys = Phaser.Types.Input.Keyboard.CursorKeys & {
+    up: Phaser.Input.Keyboard.Key;
+    left: Phaser.Input.Keyboard.Key;
+    right: Phaser.Input.Keyboard.Key;
+    down: Phaser.Input.Keyboard.Key;
+    arrowUp: Phaser.Input.Keyboard.Key;
+    arrowLeft: Phaser.Input.Keyboard.Key;
+    arrowRight: Phaser.Input.Keyboard.Key;
+    arrowDown: Phaser.Input.Keyboard.Key;
+};
+
 export class Game extends Scene
 {
     player: Phaser.GameObjects.Rectangle;
-    cursors: Phaser.Types.Input.Keyboard.CursorKeys;
+    cursors: MovementKeys;
+    playerHealth: number = PLAYER_MAX_HEALTH;
+    playerDamageCooldown: number = 0;
+    playerHealthBar: Phaser.GameObjects.Graphics;
+    playerHealthText: Phaser.GameObjects.Text;
+    uiContainer: Phaser.GameObjects.Container;
+    uiHpLabel: Phaser.GameObjects.Text;
 
-    // Placeholder targets with no health/death yet - that's the next build step. These just give
-    // the auto-fire something to aim at so we can see and test it working.
-    enemies: Phaser.GameObjects.Rectangle[] = [];
+    enemies: Enemy[] = [];
     bullets: Bullet[] = [];
     platformRects: Phaser.GameObjects.Rectangle[] = [];
+    damagePopups: DamagePopup[] = [];
 
-    currentTarget: Phaser.GameObjects.Rectangle | undefined;
+    currentTarget: Enemy | undefined;
     targetLine: Phaser.GameObjects.Graphics;
 
     constructor ()
@@ -88,7 +126,16 @@ export class Game extends Scene
         // Camera follows the player but won't scroll past the room bounds set above.
         this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
 
-        this.cursors = this.input.keyboard!.createCursorKeys();
+        this.cursors = this.input.keyboard!.addKeys({
+            up: Input.Keyboard.KeyCodes.W,
+            left: Input.Keyboard.KeyCodes.A,
+            right: Input.Keyboard.KeyCodes.D,
+            down: Input.Keyboard.KeyCodes.S,
+            arrowUp: Input.Keyboard.KeyCodes.UP,
+            arrowLeft: Input.Keyboard.KeyCodes.LEFT,
+            arrowRight: Input.Keyboard.KeyCodes.RIGHT,
+            arrowDown: Input.Keyboard.KeyCodes.DOWN
+        }) as MovementKeys;
 
         const enemySpots: [x: number, y: number][] = [
             [900, 700],
@@ -96,8 +143,65 @@ export class Game extends Scene
             [2000, 700]
         ];
         for (const [x, y] of enemySpots) {
-            this.enemies.push(this.add.rectangle(x, y, 40, 40, ENEMY_COLOR));
+            const body = this.add.rectangle(x, y, 40, 40, ENEMY_COLOR);
+            this.physics.add.existing(body);
+            const bodyPhysics = body.body as Phaser.Physics.Arcade.Body;
+            bodyPhysics.setImmovable(true);
+            bodyPhysics.setAllowGravity(false);
+
+            const healthBar = this.add.graphics();
+            const healthText = this.add.text(x, y - 32, `${ENEMY_MAX_HEALTH}`, {
+                fontFamily: 'Arial',
+                fontSize: '12px',
+                color: '#ffffff',
+                stroke: '#000000',
+                strokeThickness: 3,
+                align: 'center'
+            }).setOrigin(0.5);
+
+            const enemy: Enemy = {
+                body,
+                health: ENEMY_MAX_HEALTH,
+                maxHealth: ENEMY_MAX_HEALTH,
+                damage: ENEMY_DAMAGE,
+                fireCooldown: 600 + Math.random() * 500,
+                healthBar,
+                healthText
+            };
+
+            this.updateEnemyHealthBar(enemy);
+            this.enemies.push(enemy);
         }
+
+        const panel = this.add.rectangle(110, 42, 200, 70, 0x111827, 0.8);
+        const title = this.add.text(20, 16, 'PLAYER', {
+            fontFamily: 'Arial',
+            fontSize: '14px',
+            color: '#e5e7eb',
+            stroke: '#000000',
+            strokeThickness: 3,
+            fontStyle: 'bold'
+        });
+        this.uiHpLabel = this.add.text(20, 34, `HP ${this.playerHealth}/${PLAYER_MAX_HEALTH}`, {
+            fontFamily: 'Arial',
+            fontSize: '16px',
+            color: '#ffffff',
+            stroke: '#000000',
+            strokeThickness: 4,
+            fontStyle: 'bold'
+        });
+        this.uiContainer = this.add.container(18, 12, [panel, title, this.uiHpLabel]);
+
+        this.playerHealthBar = this.add.graphics();
+        this.playerHealthText = this.add.text(this.player.x, this.player.y - 46, `${this.playerHealth}`, {
+            fontFamily: 'Arial',
+            fontSize: '12px',
+            color: '#ffffff',
+            stroke: '#000000',
+            strokeThickness: 3,
+            align: 'center'
+        }).setOrigin(0.5);
+        this.updatePlayerHealthBar();
 
         this.targetLine = this.add.graphics();
 
@@ -113,10 +217,15 @@ export class Game extends Scene
     update (_time: number, delta: number)
     {
         const body = this.player.body as Phaser.Physics.Arcade.Body;
+        this.playerDamageCooldown = Math.max(0, this.playerDamageCooldown - delta);
 
-        if (this.cursors.left.isDown) {
+        const leftHeld = this.cursors.left?.isDown || this.cursors.arrowLeft?.isDown;
+        const rightHeld = this.cursors.right?.isDown || this.cursors.arrowRight?.isDown;
+        const jumpPressed = Input.Keyboard.JustDown(this.cursors.up) || Input.Keyboard.JustDown(this.cursors.arrowUp);
+
+        if (leftHeld) {
             body.setVelocityX(-MOVE_SPEED);
-        } else if (this.cursors.right.isDown) {
+        } else if (rightHeld) {
             body.setVelocityX(MOVE_SPEED);
         } else {
             body.setVelocityX(0);
@@ -124,21 +233,77 @@ export class Game extends Scene
 
         // blocked.down / touching.down is true only while standing on something - stops mid-air jumps.
         const onGround = body.blocked.down || body.touching.down;
-        if (onGround && Input.Keyboard.JustDown(this.cursors.up)) {
+        if (onGround && jumpPressed) {
             body.setVelocityY(JUMP_VELOCITY);
         }
 
+        for (const enemy of this.enemies) {
+            this.updateEnemyHealthBar(enemy);
+            this.updateEnemyFire(enemy, delta);
+        }
+
+        this.updatePlayerHealthBar();
+        this.updateDamagePopups(delta);
+        this.handleEnemyContactDamage();
         this.updateTargetIndicator();
         this.updateBullets(delta);
     }
 
-    findNearestEnemy (): Phaser.GameObjects.Rectangle | undefined
+    updatePlayerHealthBar ()
     {
-        let nearest: Phaser.GameObjects.Rectangle | undefined;
+        const barWidth = 52;
+        const barHeight = 8;
+        const healthRatio = Math.max(0, Math.min(1, this.playerHealth / PLAYER_MAX_HEALTH));
+        const x = this.player.x;
+        const y = this.player.y - 42;
+
+        this.playerHealthBar.clear();
+        this.playerHealthBar.fillStyle(0x000000, 0.8);
+        this.playerHealthBar.fillRect(x - barWidth / 2, y - barHeight / 2, barWidth, barHeight);
+        this.playerHealthBar.fillStyle(0xf87171, 1);
+        this.playerHealthBar.fillRect(x - barWidth / 2, y - barHeight / 2, barWidth * healthRatio, barHeight);
+        this.playerHealthBar.lineStyle(1, 0xffffff, 0.8);
+        this.playerHealthBar.strokeRect(x - barWidth / 2, y - barHeight / 2, barWidth, barHeight);
+
+        this.playerHealthText.setPosition(x, y - 12);
+        this.playerHealthText.setText(`${this.playerHealth}`);
+        this.uiHpLabel.setText(`HP ${this.playerHealth}/${PLAYER_MAX_HEALTH}`);
+    }
+
+    updateDamagePopups (delta: number)
+    {
+        for (let i = this.damagePopups.length - 1; i >= 0; i--) {
+            const popup = this.damagePopups[i];
+            popup.ttl -= delta;
+            popup.text.y -= 0.08 * delta;
+            popup.text.alpha = Math.max(0, popup.ttl / 300);
+
+            if (popup.ttl <= 0) {
+                popup.text.destroy();
+                this.damagePopups.splice(i, 1);
+            }
+        }
+    }
+
+    isEnemyVisible (enemy: Enemy): boolean
+    {
+        const cameraBounds = this.cameras.main.worldView;
+        const enemyBounds = enemy.body.getBounds();
+        return Geom.Intersects.RectangleToRectangle(cameraBounds, enemyBounds);
+    }
+
+    findNearestEnemy (): Enemy | undefined
+    {
+        const visibleEnemies = this.enemies.filter((enemy) => this.isEnemyVisible(enemy));
+        if (visibleEnemies.length === 0) {
+            return undefined;
+        }
+
+        let nearest: Enemy | undefined;
         let nearestDistanceSquared = Infinity;
 
-        for (const enemy of this.enemies) {
-            const distSq = distanceSquared(this.player.x, this.player.y, enemy.x, enemy.y);
+        for (const enemy of visibleEnemies) {
+            const distSq = distanceSquared(this.player.x, this.player.y, enemy.body.x, enemy.body.y);
             if (distSq < nearestDistanceSquared) {
                 nearestDistanceSquared = distSq;
                 nearest = enemy;
@@ -148,23 +313,112 @@ export class Game extends Scene
         return nearest;
     }
 
-    // Recomputes the nearest enemy every frame, highlights it, and draws a line to it so it's
+    // Recomputes the nearest visible enemy every frame, highlights it, and draws a line to it so it's
     // obvious - while testing - who's about to get shot, even before the next bullet fires.
     updateTargetIndicator ()
     {
         const target = this.findNearestEnemy();
 
         if (target !== this.currentTarget) {
-            this.currentTarget?.setFillStyle(ENEMY_COLOR);
-            target?.setFillStyle(TARGET_COLOR);
+            this.currentTarget?.body.setFillStyle(ENEMY_COLOR);
+            target?.body.setFillStyle(TARGET_COLOR);
             this.currentTarget = target;
         }
 
         this.targetLine.clear();
         if (target) {
             this.targetLine.lineStyle(2, TARGET_COLOR, 0.5);
-            this.targetLine.lineBetween(this.player.x, this.player.y, target.x, target.y);
+            this.targetLine.lineBetween(this.player.x, this.player.y, target.body.x, target.body.y);
         }
+    }
+
+    handleEnemyContactDamage ()
+    {
+        if (this.playerDamageCooldown > 0) {
+            return;
+        }
+
+        const playerBounds = this.player.getBounds();
+        for (const enemy of this.enemies) {
+            const enemyBounds = enemy.body.getBounds();
+            if (Geom.Intersects.RectangleToRectangle(playerBounds, enemyBounds)) {
+                this.playerHealth = Math.max(0, this.playerHealth - enemy.damage);
+                this.playerDamageCooldown = PLAYER_DAMAGE_COOLDOWN_MS;
+                this.player.setFillStyle(0xff6666);
+                this.time.delayedCall(120, () => this.player.setFillStyle(0xe0e0e0));
+                return;
+            }
+        }
+    }
+
+    updateEnemyHealthBar (enemy: Enemy)
+    {
+        const barWidth = 36;
+        const barHeight = 6;
+        const healthRatio = Math.max(0, Math.min(1, enemy.health / enemy.maxHealth));
+        const x = enemy.body.x;
+        const y = enemy.body.y - 28;
+
+        enemy.healthBar.clear();
+        enemy.healthBar.fillStyle(0x000000, 0.8);
+        enemy.healthBar.fillRect(x - barWidth / 2, y - barHeight / 2, barWidth, barHeight);
+        enemy.healthBar.fillStyle(0x4ade80, 1);
+        enemy.healthBar.fillRect(x - barWidth / 2, y - barHeight / 2, barWidth * healthRatio, barHeight);
+        enemy.healthBar.lineStyle(1, 0xffffff, 0.8);
+        enemy.healthBar.strokeRect(x - barWidth / 2, y - barHeight / 2, barWidth, barHeight);
+
+        enemy.healthText.setPosition(x, y - 12);
+        enemy.healthText.setText(`${enemy.health}`);
+    }
+
+    damageEnemy (enemy: Enemy)
+    {
+        enemy.health -= 1;
+        enemy.body.setFillStyle(0xff8a66);
+        this.updateEnemyHealthBar(enemy);
+
+        const popup = this.add.text(enemy.body.x, enemy.body.y - 52, '-1', {
+            fontFamily: 'Arial',
+            fontSize: '16px',
+            color: '#ffb3b3',
+            stroke: '#000000',
+            strokeThickness: 4,
+            align: 'center'
+        }).setOrigin(0.5);
+        this.damagePopups.push({ text: popup, ttl: 350 });
+
+        if (enemy.health <= 0) {
+            enemy.body.destroy();
+            enemy.healthBar.destroy();
+            enemy.healthText.destroy();
+            this.enemies = this.enemies.filter((candidate) => candidate !== enemy);
+            this.currentTarget = this.findNearestEnemy();
+            this.updateTargetIndicator();
+            return;
+        }
+
+        this.time.delayedCall(80, () => enemy.body.setFillStyle(ENEMY_COLOR));
+    }
+
+    updateEnemyFire (enemy: Enemy, delta: number)
+    {
+        enemy.fireCooldown -= delta;
+        const distanceToPlayer = distanceSquared(enemy.body.x, enemy.body.y, this.player.x, this.player.y);
+        const visibleAndInRange = distanceToPlayer <= 700 * 700;
+
+        if (enemy.fireCooldown > 0 || !visibleAndInRange) {
+            return;
+        }
+
+        const angle = Math.atan2(this.player.y - enemy.body.y, this.player.x - enemy.body.x);
+        this.bullets.push({
+            shape: this.add.circle(enemy.body.x, enemy.body.y, 5, 0x9ca3af),
+            velocityX: Math.cos(angle) * ENEMY_BULLET_SPEED,
+            velocityY: Math.sin(angle) * ENEMY_BULLET_SPEED,
+            owner: 'enemy',
+            damage: enemy.damage
+        });
+        enemy.fireCooldown = 1200 + Math.random() * 600;
     }
 
     fireAtNearestEnemy ()
@@ -175,12 +429,14 @@ export class Game extends Scene
         }
 
         // atan2 gives the angle from the player to the target; cos/sin split it into x/y speed.
-        const angle = Math.atan2(target.y - this.player.y, target.x - this.player.x);
+        const angle = Math.atan2(target.body.y - this.player.y, target.body.x - this.player.x);
 
         this.bullets.push({
             shape: this.add.circle(this.player.x, this.player.y, 6, 0xffe066),
             velocityX: Math.cos(angle) * BULLET_SPEED,
-            velocityY: Math.sin(angle) * BULLET_SPEED
+            velocityY: Math.sin(angle) * BULLET_SPEED,
+            owner: 'player',
+            damage: 1
         });
     }
 
@@ -197,14 +453,38 @@ export class Game extends Scene
             const outOfBounds = bullet.shape.x < 0 || bullet.shape.x > ROOM_WIDTH
                 || bullet.shape.y < 0 || bullet.shape.y > ROOM_HEIGHT;
             const hitPlatform = this.platformRects.some((platform) => platform.getBounds().contains(bullet.shape.x, bullet.shape.y));
-            const hitEnemy = this.enemies.some((enemy) => {
-                const bounds = enemy.getBounds();
-                const closestX = Math.max(bounds.left, Math.min(bullet.shape.x, bounds.right));
-                const closestY = Math.max(bounds.top, Math.min(bullet.shape.y, bounds.bottom));
-                return distanceSquared(bullet.shape.x, bullet.shape.y, closestX, closestY) <= bullet.shape.radius ** 2;
-            });
 
-            if (outOfBounds || hitPlatform || hitEnemy) {
+            if (bullet.owner === 'player') {
+                const hitEnemy = this.enemies.find((enemy) => {
+                    const bounds = enemy.body.getBounds();
+                    const closestX = Math.max(bounds.left, Math.min(bullet.shape.x, bounds.right));
+                    const closestY = Math.max(bounds.top, Math.min(bullet.shape.y, bounds.bottom));
+                    return distanceSquared(bullet.shape.x, bullet.shape.y, closestX, closestY) <= bullet.shape.radius ** 2;
+                });
+
+                if (outOfBounds || hitPlatform) {
+                    bullet.shape.destroy();
+                    this.bullets.splice(i, 1);
+                    continue;
+                }
+
+                if (hitEnemy) {
+                    this.damageEnemy(hitEnemy);
+                    bullet.shape.destroy();
+                    this.bullets.splice(i, 1);
+                }
+                continue;
+            }
+
+            const playerBounds = this.player.getBounds();
+            const hitPlayer = playerBounds.contains(bullet.shape.x, bullet.shape.y);
+            if (outOfBounds || hitPlatform || hitPlayer) {
+                if (hitPlayer) {
+                    this.playerHealth = Math.max(0, this.playerHealth - bullet.damage);
+                    this.playerDamageCooldown = PLAYER_DAMAGE_COOLDOWN_MS;
+                    this.player.setFillStyle(0xff6666);
+                    this.time.delayedCall(120, () => this.player.setFillStyle(0xe0e0e0));
+                }
                 bullet.shape.destroy();
                 this.bullets.splice(i, 1);
             }

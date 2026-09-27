@@ -5,10 +5,16 @@ export class MainMenu extends Scene
     background: GameObjects.Image;
     logo: GameObjects.Image;
     title: GameObjects.Text;
+    subtitle: GameObjects.Text;
 
     constructor ()
     {
         super('MainMenu');
+    }
+
+    private startGame (): void
+    {
+        this.scene.start('Game');
     }
 
     create ()
@@ -23,10 +29,14 @@ export class MainMenu extends Scene
             align: 'center'
         }).setOrigin(0.5);
 
-        this.input.once('pointerdown', () => {
+        this.subtitle = this.add.text(512, 520, 'Click or press Space/Enter to start', {
+            fontFamily: 'Arial', fontSize: 20, color: '#eaeaea',
+            stroke: '#000000', strokeThickness: 4,
+            align: 'center'
+        }).setOrigin(0.5);
 
-            this.scene.start('Game');
-
-        });
+        this.input.once('pointerdown', this.startGame, this);
+        this.input.keyboard?.once('keydown-SPACE', this.startGame, this);
+        this.input.keyboard?.once('keydown-ENTER', this.startGame, this);
     }
 }
