@@ -7,7 +7,7 @@ const JUMP_VELOCITY = -450;
 
 const ROOM_WIDTH = 1024;
 const ROOM_HEIGHT = 768;
-const ROOM_COUNT = 3;
+const ROOM_COUNT = 8;
 
 type RoomTerrain = {
     backgroundColor: number;
@@ -34,6 +34,36 @@ const ROOM_TERRAINS: Record<number, RoomTerrain> = {
         groundColor: 0x4b343c,
         platformColor: 0x68464b,
         platforms: [[190, 650, 190], [410, 590, 180], [630, 650, 180], [830, 570, 200]]
+    },
+    4: {
+        backgroundColor: 0x1e2930,
+        groundColor: 0x3e5556,
+        platformColor: 0x52706c,
+        platforms: [[180, 610, 190], [410, 680, 220], [680, 590, 190], [870, 660, 150]]
+    },
+    5: {
+        backgroundColor: 0x28251e,
+        groundColor: 0x514a37,
+        platformColor: 0x716144,
+        platforms: [[150, 670, 180], [370, 600, 180], [620, 660, 200], [850, 570, 180]]
+    },
+    6: {
+        backgroundColor: 0x1b2430,
+        groundColor: 0x394958,
+        platformColor: 0x506275,
+        platforms: [[160, 590, 180], [390, 660, 200], [650, 590, 200], [870, 660, 160]]
+    },
+    7: {
+        backgroundColor: 0x29202d,
+        groundColor: 0x514050,
+        platformColor: 0x71566a,
+        platforms: [[170, 660, 200], [420, 570, 180], [650, 660, 180], [870, 590, 180]]
+    },
+    8: {
+        backgroundColor: 0x202b27,
+        groundColor: 0x46574b,
+        platformColor: 0x637457,
+        platforms: [[160, 620, 180], [380, 680, 180], [620, 600, 200], [860, 650, 180]]
     }
 };
 
@@ -75,6 +105,10 @@ type Bullet = {
 type Enemy = {
     body: Phaser.GameObjects.Rectangle;
     details: Phaser.GameObjects.Graphics;
+    isFlying: boolean;
+    flightOriginY: number;
+    flightTimer: number;
+    flightPhase: number;
     patrolLeft: number;
     patrolRight: number;
     moveDirection: number;
@@ -190,6 +224,9 @@ export class Game extends Scene
     damagePopups: DamagePopup[] = [];
     impactParticles: ImpactParticle[] = [];
     hitStopRemaining: number = 0;
+    touchLeft: boolean = false;
+    touchRight: boolean = false;
+    touchJump: boolean = false;
 
     currentTarget: Enemy | undefined;
     targetLine: Phaser.GameObjects.Graphics;
@@ -214,7 +251,12 @@ export class Game extends Scene
             fireRateMs: FIRE_RATE_MS,
             maxHealth: PLAYER_MAX_HEALTH,
             bulletSpeed: BULLET_SPEED,
-            pickupRadius: 140
+            pickupRadius: 140,
+            jumpVelocity: JUMP_VELOCITY,
+            xpMultiplier: 1,
+            bulletRadius: 6,
+            roomHeal: 0,
+            damageReduction: 0
         });
         this.skillManager = new SkillManager();
         this.playerHealth = this.playerStats.stats.maxHealth;
@@ -280,6 +322,7 @@ export class Game extends Scene
             arrowRight: Input.Keyboard.KeyCodes.RIGHT,
             arrowDown: Input.Keyboard.KeyCodes.DOWN
         }) as MovementKeys;
+        this.createTouchControls();
 
         this.spawnRoomEnemies();
 
@@ -338,15 +381,39 @@ export class Game extends Scene
         this.input.on('pointerdown', this.handleSkillCardPointer, this);
     }
 
+    createTouchControls (): void
+    {
+        const createButton = (x: number, label: string, setHeld: (held: boolean) => void): void => {
+            const button = this.add.circle(x, 684, 36, 0x111827, 0.55)
+                .setStrokeStyle(2, 0xe2e8f0, 0.65)
+                .setScrollFactor(0)
+                .setDepth(50)
+                .setInteractive({ useHandCursor: true });
+            this.add.text(x, 684, label, {
+                fontFamily: 'Arial Black',
+                fontSize: 22,
+                color: '#ffffff'
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(51);
+            button.on('pointerdown', () => {
+                this.unlockAudio();
+                setHeld(true);
+            });
+            button.on('pointerup', () => setHeld(false));
+            button.on('pointerout', () => setHeld(false));
+        };
+
+        createButton(58, '<', (held) => { this.touchLeft = held; });
+        createButton(142, '>', (held) => { this.touchRight = held; });
+        createButton(966, '^', (held) => { this.touchJump = held; });
+    }
+
     spawnRoomEnemies (): void
     {
-        const roomSpots: Record<number, [x: number, y: number][]> = {
-            1: [[250, 700], [512, 700], [774, 700]],
-            2: [[300, 700], [512, 700], [724, 700]],
-            3: [[220, 700], [512, 700], [804, 700]]
-        };
-        const enemySpots = roomSpots[this.roomNumber] ?? roomSpots[ROOM_COUNT];
-        for (const [x, y] of enemySpots) {
+        const enemyCount = Math.min(6, 3 + Math.floor((this.roomNumber - 1) / 2));
+        for (let index = 0; index < enemyCount; index++) {
+            const x = ROOM_WIDTH * (index + 1) / (enemyCount + 1);
+            const isFlying = this.roomNumber >= 2 && (index === 1 || (this.roomNumber >= 5 && index === 3));
+            const y = isFlying ? 420 + (index % 2) * 75 : 700;
             const body = this.add.rectangle(x, y, 40, 40, ENEMY_COLOR);
             this.physics.add.existing(body);
             const bodyPhysics = body.body as Phaser.Physics.Arcade.Body;
@@ -368,6 +435,10 @@ export class Game extends Scene
             const enemy: Enemy = {
                 body,
                 details,
+                isFlying,
+                flightOriginY: y,
+                flightTimer: 0,
+                flightPhase: Math.random() * Math.PI * 2,
                 patrolLeft: Math.max(65, x - 82),
                 patrolRight: Math.min(ROOM_WIDTH - 65, x + 82),
                 moveDirection: Math.random() < 0.5 ? -1 : 1,
@@ -391,6 +462,14 @@ export class Game extends Scene
         const { x, y } = enemy.body;
         const details = enemy.details;
         details.clear();
+        if (enemy.isFlying) {
+            details.fillStyle(0x572b4c, 1);
+            details.fillTriangle(x - 15, y - 5, x - 38, y - 23, x - 31, y + 3);
+            details.fillTriangle(x + 15, y - 5, x + 38, y - 23, x + 31, y + 3);
+            details.fillStyle(0xb76b92, 1);
+            details.fillTriangle(x - 14, y + 2, x - 32, y - 9, x - 25, y + 8);
+            details.fillTriangle(x + 14, y + 2, x + 32, y - 9, x + 25, y + 8);
+        }
         details.fillStyle(0x32121b, 1);
         details.fillTriangle(x - 14, y - 14, x - 21, y - 31, x - 5, y - 23);
         details.fillTriangle(x + 14, y - 14, x + 21, y - 31, x + 5, y - 23);
@@ -417,6 +496,10 @@ export class Game extends Scene
         }
 
         enemy.body.x = Math.max(enemy.patrolLeft, Math.min(enemy.patrolRight, nextX));
+        if (enemy.isFlying) {
+            enemy.flightTimer += delta;
+            enemy.body.y = enemy.flightOriginY + Math.sin(enemy.flightTimer * 0.002 + enemy.flightPhase) * 36;
+        }
         this.drawEnemyDetails(enemy);
     }
 
@@ -451,21 +534,32 @@ export class Game extends Scene
         const details = this.playerDetails;
 
         details.clear();
+        details.lineStyle(2, this.lifeStage === 'Baby' ? 0x493126 : 0x202427, 1);
+        details.strokeRect(x - halfWidth, top, this.player.width, this.player.height);
 
         if (this.lifeStage === 'Baby') {
             details.fillStyle(0x493126, 1);
             details.fillCircle(x, top + 5, 4);
             details.fillTriangle(x - 2, top + 7, x + 2, top - 2, x + 6, top + 7);
+            details.fillStyle(0xffd6af, 1);
+            details.fillCircle(x - halfWidth + 2, y + 6, 4);
+            details.fillCircle(x + halfWidth - 2, y + 6, 4);
         } else if (this.lifeStage === 'Teen') {
             details.fillStyle(0x202427, 1);
             details.fillRect(x - halfWidth * 0.4, top + 3, halfWidth * 0.8, 6);
             details.fillTriangle(x - 5, top + 6, x, top - 4, x + 2, top + 7);
+            details.fillStyle(0xb97855, 1);
+            details.fillCircle(x - halfWidth + 3, y + 4, 4);
+            details.fillCircle(x + halfWidth - 3, y + 4, 4);
         } else {
             details.fillStyle(0x313946, 1);
             details.fillRect(x - halfWidth * 0.42, top + 4, halfWidth * 0.84, 8);
             details.fillTriangle(x - 5, top + 5, x, top - 5, x + 5, top + 5);
             details.fillTriangle(x - halfWidth, y - 4, x - halfWidth - 5, y + 7, x - halfWidth + 5, y + 9);
             details.fillTriangle(x + halfWidth, y - 4, x + halfWidth + 5, y + 7, x + halfWidth - 5, y + 9);
+            details.fillStyle(0x313946, 1);
+            details.fillCircle(x - halfWidth + 2, y + 8, 5);
+            details.fillCircle(x + halfWidth - 2, y + 8, 5);
         }
 
         details.fillStyle(this.lifeStage === 'Adult' ? 0x8be1d0 : 0xffe5ad, 1);
@@ -483,15 +577,29 @@ export class Game extends Scene
             details.fillCircle(x, eyeY + 9, 3);
             details.lineStyle(1, 0xe7e0c5, 1);
             details.strokeCircle(x, eyeY + 9, 4);
+            details.fillStyle(0xe8d7b7, 1);
+            details.fillRect(x - halfWidth * 0.45, y + halfHeight * 0.38, halfWidth * 0.9, 5);
         } else if (this.lifeStage === 'Teen') {
             details.fillStyle(0x263536, 1);
             details.fillRect(x - halfWidth * 0.28, eyeY + 6, halfWidth * 0.56, 4);
+            details.fillStyle(0xb97855, 1);
+            details.fillRect(x - halfWidth * 0.38, y + halfHeight * 0.27, halfWidth * 0.76, 5);
+            details.fillStyle(0xe4c36b, 1);
+            details.fillRect(x - 3, y + halfHeight * 0.27, 6, 5);
         } else {
             details.fillStyle(0x313946, 1);
             details.fillRect(x - halfWidth * 0.36, eyeY + 6, halfWidth * 0.72, 7);
             details.fillStyle(0x8be1d0, 1);
             details.fillRect(x - halfWidth * 0.24, eyeY + 8, halfWidth * 0.48, 2);
+            details.fillStyle(0xb7c3cf, 1);
+            details.fillRect(x - halfWidth * 0.5, y + halfHeight * 0.22, this.player.width, 5);
+            details.fillStyle(0x303944, 1);
+            details.fillRect(x - halfWidth * 0.38, y + halfHeight * 0.38, halfWidth * 0.76, 8);
         }
+
+        details.fillStyle(0x27272a, 1);
+        details.fillRect(x - halfWidth * 0.48, y + halfHeight - 5, halfWidth * 0.42, 5);
+        details.fillRect(x + halfWidth * 0.06, y + halfHeight - 5, halfWidth * 0.42, 5);
     }
 
     checkRoomClear (): void
@@ -626,15 +734,17 @@ export class Game extends Scene
     startNextRoom (): void
     {
         if (this.roomNumber >= ROOM_COUNT) {
-            this.scene.start('GameOver', { victory: true });
+            this.scene.start('GameOver', { victory: true, roomsCleared: ROOM_COUNT });
             return;
         }
 
         this.roomNumber += 1;
+        this.playerHealth = Math.min(this.playerStats.stats.maxHealth, this.playerHealth + this.playerStats.stats.roomHeal);
         this.setRoomTerrain(this.roomNumber);
         this.roomClearHandled = false;
         this.playerFireCooldown = this.playerStats.stats.fireRateMs;
         this.uiTitle.setText(`${this.lifeStage.toUpperCase()}  RUN  |  ROOM ${this.roomNumber} / ${ROOM_COUNT}`);
+        this.updatePlayerHealthBar();
         this.spawnRoomEnemies();
         this.currentTarget = this.findNearestEnemy();
         this.updateTargetIndicator();
@@ -660,9 +770,9 @@ export class Game extends Scene
         const body = this.player.body as Phaser.Physics.Arcade.Body;
         this.contactDamageCooldown = Math.max(0, this.contactDamageCooldown - delta);
 
-        const leftHeld = this.cursors.left?.isDown || this.cursors.arrowLeft?.isDown;
-        const rightHeld = this.cursors.right?.isDown || this.cursors.arrowRight?.isDown;
-        const jumpPressed = Input.Keyboard.JustDown(this.cursors.up) || Input.Keyboard.JustDown(this.cursors.arrowUp);
+        const leftHeld = this.touchLeft || this.cursors.left?.isDown || this.cursors.arrowLeft?.isDown;
+        const rightHeld = this.touchRight || this.cursors.right?.isDown || this.cursors.arrowRight?.isDown;
+        const jumpPressed = this.touchJump || Input.Keyboard.JustDown(this.cursors.up) || Input.Keyboard.JustDown(this.cursors.arrowUp);
 
         if (leftHeld) {
             body.setVelocityX(-this.playerStats.stats.moveSpeed);
@@ -675,7 +785,7 @@ export class Game extends Scene
         // blocked.down / touching.down is true only while standing on something - stops mid-air jumps.
         const onGround = body.blocked.down || body.touching.down;
         if (onGround && jumpPressed) {
-            body.setVelocityY(JUMP_VELOCITY);
+            body.setVelocityY(this.playerStats.stats.jumpVelocity);
         }
 
         this.drawPlayerAppearance();
@@ -923,7 +1033,7 @@ export class Game extends Scene
         for (const enemy of this.enemies) {
             const enemyBounds = enemy.body.getBounds();
             if (Geom.Intersects.RectangleToRectangle(playerBounds, enemyBounds)) {
-                this.playerHealth = Math.max(0, this.playerHealth - enemy.damage);
+                this.playerHealth = Math.max(0, this.playerHealth - enemy.damage * (1 - this.playerStats.stats.damageReduction));
                 this.contactDamageCooldown = PLAYER_DAMAGE_COOLDOWN_MS;
                 this.player.setFillStyle(0xff6666);
                 this.playPlayerDamageFeedback();
@@ -993,8 +1103,9 @@ export class Game extends Scene
     collectPickup (pickup: Pickup): void
     {
         if (pickup.type === 'xp') {
-            this.playerXp += pickup.value;
-            this.xpProgress += pickup.value;
+            const xpGained = pickup.value * this.playerStats.stats.xpMultiplier;
+            this.playerXp += xpGained;
+            this.xpProgress += xpGained;
             while (this.xpProgress >= BATTLE_XP_TO_PICK) {
                 this.xpProgress -= BATTLE_XP_TO_PICK;
                 this.skillManager.bankPick();
@@ -1007,7 +1118,8 @@ export class Game extends Scene
         if (isXp && !this.roomClearHandled) {
             this.playJuiceSound('pickup');
         }
-        const popupMessage = isXp ? `+${pickup.value} XP` : `+${pickup.value} Coin`;
+        const xpGained = pickup.value * this.playerStats.stats.xpMultiplier;
+        const popupMessage = isXp ? `+${xpGained} XP` : `+${pickup.value} Coin`;
         const popup = this.add.text(this.player.x, this.player.y - 34, popupMessage, {
             fontFamily: 'Arial',
             fontSize: '12px',
@@ -1101,7 +1213,7 @@ export class Game extends Scene
         const angle = Math.atan2(target.body.y - this.player.y, target.body.x - this.player.x);
 
         this.bullets.push({
-            shape: this.add.circle(this.player.x, this.player.y, 6, 0xffe066),
+            shape: this.add.circle(this.player.x, this.player.y, this.playerStats.stats.bulletRadius, 0xffe066),
             velocityX: Math.cos(angle) * BULLET_SPEED,
             velocityY: Math.sin(angle) * BULLET_SPEED,
             owner: 'player',
@@ -1149,7 +1261,7 @@ export class Game extends Scene
             const hitPlayer = playerBounds.contains(bullet.shape.x, bullet.shape.y);
             if (outOfBounds || hitPlatform || hitPlayer) {
                 if (hitPlayer) {
-                    this.playerHealth = Math.max(0, this.playerHealth - bullet.damage);
+                    this.playerHealth = Math.max(0, this.playerHealth - bullet.damage * (1 - this.playerStats.stats.damageReduction));
                     this.player.setFillStyle(0xff6666);
                     this.playPlayerDamageFeedback();
                     this.time.delayedCall(120, () => this.player.setFillStyle(PLAYER_COLORS[this.lifeStage]));

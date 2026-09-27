@@ -6,7 +6,12 @@ const STAT_KEYS: PlayerStatKey[] = [
     'fireRateMs',
     'maxHealth',
     'bulletSpeed',
-    'pickupRadius'
+    'pickupRadius',
+    'jumpVelocity',
+    'xpMultiplier',
+    'bulletRadius',
+    'roomHeal',
+    'damageReduction'
 ];
 
 export class PlayerStats
@@ -35,7 +40,12 @@ export class PlayerStats
             fireRateMs: 0,
             maxHealth: 0,
             bulletSpeed: 0,
-            pickupRadius: 0
+            pickupRadius: 0,
+            jumpVelocity: 0,
+            xpMultiplier: 0,
+            bulletRadius: 0,
+            roomHeal: 0,
+            damageReduction: 0
         };
         const multiplicative: PlayerStatValues = {
             damage: 1,
@@ -43,7 +53,12 @@ export class PlayerStats
             fireRateMs: 1,
             maxHealth: 1,
             bulletSpeed: 1,
-            pickupRadius: 1
+            pickupRadius: 1,
+            jumpVelocity: 1,
+            xpMultiplier: 1,
+            bulletRadius: 1,
+            roomHeal: 1,
+            damageReduction: 1
         };
 
         for (const skill of this.activeSkills) {

@@ -11,7 +11,7 @@ export class GameOver extends Scene
         super('GameOver');
     }
 
-    create (data: { victory?: boolean } = {})
+    create (data: { victory?: boolean; roomsCleared?: number } = {})
     {
         const victory = data.victory ?? false;
         this.camera = this.cameras.main;
@@ -28,7 +28,7 @@ export class GameOver extends Scene
             align: 'center'
         }).setOrigin(0.5);
 
-        this.add.text(512, 370, victory ? 'All 3 rooms cleared' : 'Run ended', {
+        this.add.text(512, 370, victory ? `All ${data.roomsCleared ?? 8} rooms cleared` : 'Run ended', {
             fontFamily: 'Arial',
             fontSize: 20,
             color: '#cbd5e1',
