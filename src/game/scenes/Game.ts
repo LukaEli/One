@@ -1,6 +1,8 @@
 import { Scene, Input, Geom } from 'phaser';
+import { PlayerStats } from '../skills/PlayerStats';
+import { SkillManager } from '../skills/SkillManager';
+import { SkillData } from '../skills/SkillData';
 
-const MOVE_SPEED = 200;
 const JUMP_VELOCITY = -450;
 
 // The room is much wider than the 1024-wide camera viewport, so the player can walk/scroll through it.
@@ -109,17 +111,24 @@ export class Game extends Scene
     player: Phaser.GameObjects.Rectangle;
     cursors: MovementKeys;
     lifeStage: LifeStage = 'Teen';
-    playerMoveSpeed: number = MOVE_SPEED;
-    playerDamage: number = 2;
+    playerStats: PlayerStats;
+    skillManager: SkillManager = new SkillManager();
     playerHealth: number = PLAYER_MAX_HEALTH;
     contactDamageCooldown: number = 0;
     playerHealthBar: Phaser.GameObjects.Graphics;
     playerHealthText: Phaser.GameObjects.Text;
     uiContainer: Phaser.GameObjects.Container;
     uiHpLabel: Phaser.GameObjects.Text;
+    uiTitle: Phaser.GameObjects.Text;
     xpBar: Phaser.GameObjects.Graphics;
     xpProgress: number = 0;
-    bankedSkillPicks: number = 0;
+    currentSkillChoices: SkillData[] = [];
+    skillOverlay: Phaser.GameObjects.Container | undefined;
+    skillSelectionOpen: boolean = false;
+    roomClearHandled: boolean = false;
+    roomNumber: number = 1;
+    roomPicksToSpend: number = 0;
+    playerFireCooldown: number = FIRE_RATE_MS;
     playerXp: number = 0;
     playerCoins: number = 0;
 
@@ -140,18 +149,31 @@ export class Game extends Scene
     init (data: { lifeStage?: LifeStage })
     {
         this.lifeStage = data.lifeStage ?? 'Teen';
-        const stats = LIFE_STAGE_STATS[this.lifeStage];
-        this.playerMoveSpeed = stats.moveSpeed;
-        this.playerDamage = stats.damage;
     }
 
     create ()
     {
-        this.playerHealth = PLAYER_MAX_HEALTH;
+        const stageStats = LIFE_STAGE_STATS[this.lifeStage];
+        this.playerStats = new PlayerStats({
+            damage: stageStats.damage,
+            moveSpeed: stageStats.moveSpeed,
+            fireRateMs: FIRE_RATE_MS,
+            maxHealth: PLAYER_MAX_HEALTH,
+            bulletSpeed: BULLET_SPEED,
+            pickupRadius: 140
+        });
+        this.skillManager = new SkillManager();
+        this.playerHealth = this.playerStats.stats.maxHealth;
         this.contactDamageCooldown = 0;
         this.xpProgress = 0;
-        this.bankedSkillPicks = 0;
         this.playerXp = 0;
+        this.roomNumber = 1;
+        this.roomClearHandled = false;
+        this.skillSelectionOpen = false;
+        this.roomPicksToSpend = 0;
+        this.currentSkillChoices = [];
+        this.skillOverlay = undefined;
+        this.playerFireCooldown = FIRE_RATE_MS;
         this.playerCoins = 0;
         this.enemies = [];
         this.bullets = [];
@@ -189,7 +211,6 @@ export class Game extends Scene
             this.platformRects.push(platform);
         }
 
-        const stageStats = LIFE_STAGE_STATS[this.lifeStage];
         this.player = this.add.rectangle(100, 600, stageStats.width, stageStats.height, 0xe0e0e0);
         this.physics.add.existing(this.player); // gives the rectangle a physics body, so gravity and velocity apply to it
 
@@ -212,6 +233,64 @@ export class Game extends Scene
             arrowDown: Input.Keyboard.KeyCodes.DOWN
         }) as MovementKeys;
 
+        this.spawnRoomEnemies();
+
+        const panel = this.add.rectangle(148, 44, 284, 82, 0x111827, 0.8);
+        this.uiTitle = this.add.text(16, 8, `${this.lifeStage.toUpperCase()}  RUN  |  ROOM 1`, {
+            fontFamily: 'Arial',
+            fontSize: '14px',
+            color: '#e5e7eb',
+            stroke: '#000000',
+            strokeThickness: 3,
+            fontStyle: 'bold'
+        });
+        this.uiHpLabel = this.add.text(16, 28, '', {
+            fontFamily: 'Arial',
+            fontSize: '12px',
+            color: '#ffffff',
+            stroke: '#000000',
+            strokeThickness: 4,
+            fontStyle: 'bold'
+        });
+        this.xpBar = this.add.graphics();
+        const pickLabel = this.add.text(238, 55, '', {
+            fontFamily: 'Arial',
+            fontSize: '11px',
+            color: '#b7f7d0',
+            stroke: '#000000',
+            strokeThickness: 3,
+            fontStyle: 'bold'
+        }).setName('banked-picks');
+        this.uiContainer = this.add.container(12, 10, [panel, this.uiTitle, this.uiHpLabel, this.xpBar, pickLabel]).setScrollFactor(0);
+
+        this.playerHealthBar = this.add.graphics();
+        this.playerHealthText = this.add.text(this.player.x, this.player.y - 46, `${this.playerHealth}`, {
+            fontFamily: 'Arial',
+            fontSize: '12px',
+            color: '#ffffff',
+            stroke: '#000000',
+            strokeThickness: 3,
+            align: 'center'
+        }).setOrigin(0.5);
+        this.updatePlayerHealthBar();
+
+        this.targetLine = this.add.graphics();
+
+        this.input.keyboard?.on('keydown', (event: KeyboardEvent) => {
+            if (!this.skillSelectionOpen) {
+                return;
+            }
+
+            const choice = this.currentSkillChoices[Number(event.key) - 1];
+            if (choice) {
+                this.chooseSkill(choice.id);
+            }
+        });
+        this.input.on('pointerdown', this.handleSkillCardPointer, this);
+    }
+
+    spawnRoomEnemies (): void
+    {
         const enemySpots: [x: number, y: number][] = [
             [900, 700],
             [1400, 700],
@@ -247,59 +326,152 @@ export class Game extends Scene
             this.updateEnemyHealthBar(enemy);
             this.enemies.push(enemy);
         }
+    }
 
-        const panel = this.add.rectangle(148, 44, 284, 82, 0x111827, 0.8);
-        const title = this.add.text(16, 8, `${this.lifeStage.toUpperCase()}  RUN`, {
-            fontFamily: 'Arial',
-            fontSize: '14px',
-            color: '#e5e7eb',
-            stroke: '#000000',
-            strokeThickness: 3,
-            fontStyle: 'bold'
-        });
-        this.uiHpLabel = this.add.text(16, 28, '', {
-            fontFamily: 'Arial',
-            fontSize: '12px',
+    checkRoomClear (): void
+    {
+        if (this.enemies.length > 0 || this.roomClearHandled) {
+            return;
+        }
+
+        this.roomClearHandled = true;
+        const playerBody = this.player.body as Phaser.Physics.Arcade.Body;
+        playerBody.setVelocityX(0);
+        for (const pickup of this.pickups) {
+            this.collectPickup(pickup);
+            pickup.shape.destroy();
+        }
+        this.pickups = [];
+
+        if (this.skillManager.bankedPicks > 0) {
+            this.roomPicksToSpend = this.skillManager.bankedPicks;
+            this.showSkillChoices();
+            return;
+        }
+
+        const clearText = this.add.text(512, 384, 'ROOM CLEAR', {
+            fontFamily: 'Arial Black',
+            fontSize: 40,
             color: '#ffffff',
             stroke: '#000000',
-            strokeThickness: 4,
-            fontStyle: 'bold'
+            strokeThickness: 8,
+            align: 'center'
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(100);
+        this.time.delayedCall(700, () => {
+            clearText.destroy();
+            this.startNextRoom();
         });
-        this.xpBar = this.add.graphics();
-        const pickLabel = this.add.text(238, 55, '', {
-            fontFamily: 'Arial',
-            fontSize: '11px',
-            color: '#b7f7d0',
-            stroke: '#000000',
-            strokeThickness: 3,
-            fontStyle: 'bold'
-        }).setName('banked-picks');
-        this.uiContainer = this.add.container(12, 10, [panel, title, this.uiHpLabel, this.xpBar, pickLabel]).setScrollFactor(0);
+    }
 
-        this.playerHealthBar = this.add.graphics();
-        this.playerHealthText = this.add.text(this.player.x, this.player.y - 46, `${this.playerHealth}`, {
-            fontFamily: 'Arial',
-            fontSize: '12px',
-            color: '#ffffff',
+    showSkillChoices (): void
+    {
+        this.currentSkillChoices = this.skillManager.onLevelUp();
+        this.skillSelectionOpen = true;
+        this.skillOverlay?.destroy();
+
+        const spentPicks = this.roomPicksToSpend - this.skillManager.bankedPicks + 1;
+        const background = this.add.rectangle(512, 384, 1024, 768, 0x080b12, 0.9).setInteractive();
+        const heading = this.add.text(512, 220, 'ROOM CLEAR', {
+            fontFamily: 'Arial Black',
+            fontSize: 38,
+            color: '#f8fafc',
             stroke: '#000000',
-            strokeThickness: 3,
+            strokeThickness: 7,
             align: 'center'
         }).setOrigin(0.5);
+        const prompt = this.add.text(512, 270, `PICK ${spentPicks} OF ${this.roomPicksToSpend}`, {
+            fontFamily: 'Arial',
+            fontSize: 18,
+            color: '#a7f3d0',
+            align: 'center'
+        }).setOrigin(0.5);
+        const overlayItems: Phaser.GameObjects.GameObject[] = [background, heading, prompt];
+        const cardCenters = [182, 512, 842];
+
+        this.currentSkillChoices.forEach((skill, index) => {
+            const centerX = cardCenters[index];
+            const card = this.add.rectangle(centerX, 405, 240, 230, 0x17202d, 1)
+                .setStrokeStyle(2, 0x64748b, 1)
+                .setInteractive({ useHandCursor: true });
+            const name = this.add.text(centerX, 350, skill.name, {
+                fontFamily: 'Arial Black',
+                fontSize: 20,
+                color: '#ffffff',
+                align: 'center',
+                wordWrap: { width: 205 }
+            }).setOrigin(0.5);
+            const description = this.add.text(centerX, 415, skill.description, {
+                fontFamily: 'Arial',
+                fontSize: 16,
+                color: '#cbd5e1',
+                align: 'center',
+                wordWrap: { width: 195 }
+            }).setOrigin(0.5);
+
+            card.on('pointerover', () => card.setFillStyle(0x26394b, 1));
+            card.on('pointerout', () => card.setFillStyle(0x17202d, 1));
+            overlayItems.push(card, name, description);
+        });
+
+        this.skillOverlay = this.add.container(0, 0, overlayItems).setScrollFactor(0).setDepth(100);
+    }
+
+    handleSkillCardPointer (pointer: Phaser.Input.Pointer): void
+    {
+        if (!this.skillSelectionOpen || pointer.y < 290 || pointer.y > 520) {
+            return;
+        }
+
+        const cardCenters = [182, 512, 842];
+        const choiceIndex = cardCenters.findIndex((centerX) => pointer.x >= centerX - 120 && pointer.x <= centerX + 120);
+        const choice = this.currentSkillChoices[choiceIndex];
+        if (choice) {
+            this.chooseSkill(choice.id);
+        }
+    }
+
+    chooseSkill (skillId: string): void
+    {
+        const selectedSkill = this.skillManager.chooseSkill(skillId);
+        if (!selectedSkill) {
+            return;
+        }
+
+        const previousMaxHealth = this.playerStats.stats.maxHealth;
+        this.playerStats.addSkill(selectedSkill);
+        const healthIncrease = this.playerStats.stats.maxHealth - previousMaxHealth;
+        this.playerHealth = Math.min(this.playerStats.stats.maxHealth, this.playerHealth + healthIncrease);
         this.updatePlayerHealthBar();
 
-        this.targetLine = this.add.graphics();
+        if (this.skillManager.bankedPicks > 0) {
+            this.showSkillChoices();
+            return;
+        }
 
-        // A repeating timer, independent of movement/jump input, so firing never pauses for either.
-        this.time.addEvent({
-            delay: FIRE_RATE_MS,
-            loop: true,
-            callback: this.fireAtNearestEnemy,
-            callbackScope: this
-        });
+        this.skillSelectionOpen = false;
+        this.currentSkillChoices = [];
+        this.skillOverlay?.destroy();
+        this.skillOverlay = undefined;
+        this.time.delayedCall(350, this.startNextRoom, [], this);
+    }
+
+    startNextRoom (): void
+    {
+        this.roomNumber += 1;
+        this.roomClearHandled = false;
+        this.playerFireCooldown = this.playerStats.stats.fireRateMs;
+        this.uiTitle.setText(`${this.lifeStage.toUpperCase()}  RUN  |  ROOM ${this.roomNumber}`);
+        this.spawnRoomEnemies();
+        this.currentTarget = this.findNearestEnemy();
+        this.updateTargetIndicator();
     }
 
     update (_time: number, delta: number)
     {
+        if (this.roomClearHandled) {
+            return;
+        }
+
         const body = this.player.body as Phaser.Physics.Arcade.Body;
         this.contactDamageCooldown = Math.max(0, this.contactDamageCooldown - delta);
 
@@ -308,9 +480,9 @@ export class Game extends Scene
         const jumpPressed = Input.Keyboard.JustDown(this.cursors.up) || Input.Keyboard.JustDown(this.cursors.arrowUp);
 
         if (leftHeld) {
-            body.setVelocityX(-this.playerMoveSpeed);
+            body.setVelocityX(-this.playerStats.stats.moveSpeed);
         } else if (rightHeld) {
-            body.setVelocityX(this.playerMoveSpeed);
+            body.setVelocityX(this.playerStats.stats.moveSpeed);
         } else {
             body.setVelocityX(0);
         }
@@ -332,14 +504,25 @@ export class Game extends Scene
         this.handleEnemyContactDamage();
         this.checkPlayerDefeat();
         this.updateTargetIndicator();
+        this.updateAutoFire(delta);
         this.updateBullets(delta);
+        this.checkRoomClear();
+    }
+
+    updateAutoFire (delta: number): void
+    {
+        this.playerFireCooldown -= delta;
+        if (this.playerFireCooldown <= 0) {
+            this.fireAtNearestEnemy();
+            this.playerFireCooldown = this.playerStats.stats.fireRateMs;
+        }
     }
 
     updatePlayerHealthBar ()
     {
         const barWidth = 52;
         const barHeight = 8;
-        const healthRatio = Math.max(0, Math.min(1, this.playerHealth / PLAYER_MAX_HEALTH));
+        const healthRatio = Math.max(0, Math.min(1, this.playerHealth / this.playerStats.stats.maxHealth));
         const x = this.player.x;
         const y = this.player.y - 42;
 
@@ -353,7 +536,7 @@ export class Game extends Scene
 
         this.playerHealthText.setPosition(x, y - 12);
         this.playerHealthText.setText(`${this.playerHealth}`);
-        this.uiHpLabel.setText(`HP ${this.playerHealth}/${PLAYER_MAX_HEALTH}   Coins ${this.playerCoins}`);
+        this.uiHpLabel.setText(`HP ${this.playerHealth}/${this.playerStats.stats.maxHealth}   Coins ${this.playerCoins}`);
         this.xpBar.clear();
         this.xpBar.fillStyle(0x030712, 0.95);
         this.xpBar.fillRect(16, 55, 210, 10);
@@ -362,7 +545,7 @@ export class Game extends Scene
         this.xpBar.lineStyle(1, 0xd1fae5, 0.8);
         this.xpBar.strokeRect(16, 55, 210, 10);
         const pickLabel = this.uiContainer.getByName('banked-picks') as Phaser.GameObjects.Text;
-        pickLabel.setText(`PICKS ${this.bankedSkillPicks}`);
+        pickLabel.setText(`PICKS ${this.skillManager.bankedPicks}`);
     }
 
     checkPlayerDefeat ()
@@ -512,40 +695,47 @@ export class Game extends Scene
             const dy = this.player.y - pickup.shape.y;
             const distance = Math.sqrt(dx * dx + dy * dy);
 
-            if (distance < 140) {
+            if (distance < this.playerStats.stats.pickupRadius) {
                 const pullStrength = 260 * deltaSeconds;
                 pickup.shape.x += (dx / Math.max(distance, 1)) * pullStrength;
                 pickup.shape.y += (dy / Math.max(distance, 1)) * pullStrength;
             }
 
             if (distance < 22) {
-                if (pickup.type === 'xp') {
-                    this.playerXp += pickup.value;
-                    this.xpProgress += pickup.value;
-                    while (this.xpProgress >= BATTLE_XP_TO_PICK) {
-                        this.xpProgress -= BATTLE_XP_TO_PICK;
-                        this.bankedSkillPicks += 1;
-                    }
-                } else {
-                    this.playerCoins += pickup.value;
-                }
-
-                const popupMessage = pickup.type === 'xp' ? '+10 XP' : '+1 Coin';
-                const popup = this.add.text(this.player.x, this.player.y - 34, popupMessage, {
-                    fontFamily: 'Arial',
-                    fontSize: '12px',
-                    color: pickup.type === 'xp' ? '#b7f7d0' : '#fde68a',
-                    stroke: '#000000',
-                    strokeThickness: 3,
-                    fontStyle: 'bold'
-                }).setOrigin(0.5);
-                this.damagePopups.push({ text: popup, ttl: 320 });
+                this.collectPickup(pickup);
 
                 pickup.shape.destroy();
                 this.pickups.splice(i, 1);
                 this.updatePlayerHealthBar();
             }
         }
+    }
+
+    collectPickup (pickup: Pickup): void
+    {
+        if (pickup.type === 'xp') {
+            this.playerXp += pickup.value;
+            this.xpProgress += pickup.value;
+            while (this.xpProgress >= BATTLE_XP_TO_PICK) {
+                this.xpProgress -= BATTLE_XP_TO_PICK;
+                this.skillManager.bankPick();
+            }
+        } else {
+            this.playerCoins += pickup.value;
+        }
+
+        const isXp = pickup.type === 'xp';
+        const popupMessage = isXp ? `+${pickup.value} XP` : `+${pickup.value} Coin`;
+        const popup = this.add.text(this.player.x, this.player.y - 34, popupMessage, {
+            fontFamily: 'Arial',
+            fontSize: '12px',
+            color: isXp ? '#b7f7d0' : '#fde68a',
+            stroke: '#000000',
+            strokeThickness: 3,
+            fontStyle: 'bold'
+        }).setOrigin(0.5);
+        this.damagePopups.push({ text: popup, ttl: 320 });
+        this.updatePlayerHealthBar();
     }
 
     damageEnemy (enemy: Enemy, damage: number)
@@ -627,7 +817,7 @@ export class Game extends Scene
             velocityX: Math.cos(angle) * BULLET_SPEED,
             velocityY: Math.sin(angle) * BULLET_SPEED,
             owner: 'player',
-            damage: this.playerDamage
+            damage: this.playerStats.stats.damage
         });
     }
 
