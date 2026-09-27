@@ -5,14 +5,42 @@ import { SkillData } from '../skills/SkillData';
 
 const JUMP_VELOCITY = -450;
 
-// The room is much wider than the 1024-wide camera viewport, so the player can walk/scroll through it.
-const ROOM_WIDTH = 2400;
+const ROOM_WIDTH = 1024;
 const ROOM_HEIGHT = 768;
+const ROOM_COUNT = 3;
+
+type RoomTerrain = {
+    backgroundColor: number;
+    groundColor: number;
+    platformColor: number;
+    platforms: [x: number, y: number, width: number][];
+};
+
+const ROOM_TERRAINS: Record<number, RoomTerrain> = {
+    1: {
+        backgroundColor: 0x1d1d2b,
+        groundColor: 0x3a3a4a,
+        platformColor: 0x4a4653,
+        platforms: [[260, 650, 220], [512, 560, 220], [764, 650, 220]]
+    },
+    2: {
+        backgroundColor: 0x142b2b,
+        groundColor: 0x354b45,
+        platformColor: 0x4c665b,
+        platforms: [[160, 650, 200], [400, 590, 190], [660, 650, 190], [870, 590, 180]]
+    },
+    3: {
+        backgroundColor: 0x2b1c24,
+        groundColor: 0x4b343c,
+        platformColor: 0x68464b,
+        platforms: [[190, 650, 190], [410, 590, 180], [630, 650, 180], [830, 570, 200]]
+    }
+};
 
 const FIRE_RATE_MS = 500; // how often the player auto-fires, regardless of input
 const BULLET_SPEED = 500;
 const ENEMY_BULLET_SPEED = 260;
-const PLAYER_MAX_HEALTH = 5;
+const PLAYER_MAX_HEALTH = 10;
 const PLAYER_DAMAGE_COOLDOWN_MS = 600;
 const ENEMY_MAX_HEALTH = 5;
 const ENEMY_DAMAGE = 1;
@@ -22,6 +50,12 @@ const TARGET_COLOR = 0xffa53c; // highlight for whichever enemy is currently bei
 const BATTLE_XP_TO_PICK = 30;
 
 export type LifeStage = 'Baby' | 'Teen' | 'Adult';
+
+const PLAYER_COLORS: Record<LifeStage, number> = {
+    Baby: 0xd6bd8a,
+    Teen: 0x66857d,
+    Adult: 0x778394
+};
 
 const LIFE_STAGE_STATS: Record<LifeStage, { width: number; height: number; moveSpeed: number; damage: number }> = {
     Baby: { width: 30, height: 42, moveSpeed: 240, damage: 1 },
@@ -40,6 +74,11 @@ type Bullet = {
 
 type Enemy = {
     body: Phaser.GameObjects.Rectangle;
+    details: Phaser.GameObjects.Graphics;
+    patrolLeft: number;
+    patrolRight: number;
+    moveDirection: number;
+    moveSpeed: number;
     health: number;
     maxHealth: number;
     damage: number;
@@ -57,6 +96,14 @@ type Pickup = {
     shape: Phaser.GameObjects.Arc;
     type: 'xp' | 'coin';
     value: number;
+};
+
+type ImpactParticle = {
+    shape: Phaser.GameObjects.Arc;
+    velocityX: number;
+    velocityY: number;
+    ttl: number;
+    maxTtl: number;
 };
 
 function distanceSquared (ax: number, ay: number, bx: number, by: number): number
@@ -129,6 +176,9 @@ export class Game extends Scene
     roomNumber: number = 1;
     roomPicksToSpend: number = 0;
     playerFireCooldown: number = FIRE_RATE_MS;
+    audioContext: AudioContext | undefined;
+    playerDetails: Phaser.GameObjects.Graphics;
+    ground: Phaser.GameObjects.Rectangle;
     playerXp: number = 0;
     playerCoins: number = 0;
 
@@ -136,7 +186,10 @@ export class Game extends Scene
     bullets: Bullet[] = [];
     pickups: Pickup[] = [];
     platformRects: Phaser.GameObjects.Rectangle[] = [];
+    roomPlatforms: Record<number, Phaser.GameObjects.Rectangle[]> = {};
     damagePopups: DamagePopup[] = [];
+    impactParticles: ImpactParticle[] = [];
+    hitStopRemaining: number = 0;
 
     currentTarget: Enemy | undefined;
     targetLine: Phaser.GameObjects.Graphics;
@@ -153,6 +206,7 @@ export class Game extends Scene
 
     create ()
     {
+        this.physics.world.resume();
         const stageStats = LIFE_STAGE_STATS[this.lifeStage];
         this.playerStats = new PlayerStats({
             damage: stageStats.damage,
@@ -179,39 +233,33 @@ export class Game extends Scene
         this.bullets = [];
         this.pickups = [];
         this.platformRects = [];
+        this.roomPlatforms = {};
         this.damagePopups = [];
+        this.impactParticles = [];
+        this.hitStopRemaining = 0;
         this.currentTarget = undefined;
 
-        this.cameras.main.setBackgroundColor(0x1d1d2b);
-
-        // A room is bigger than the screen, so both the physics world and the camera need to know its real size -
-        // otherwise the player would hit an invisible wall at the old 1024px edge and the camera would never scroll.
         this.physics.world.setBounds(0, 0, ROOM_WIDTH, ROOM_HEIGHT);
         this.cameras.main.setBounds(0, 0, ROOM_WIDTH, ROOM_HEIGHT);
 
         // Static group: one collider for many fixed platforms, instead of adding a separate collider per rectangle.
         const platforms = this.physics.add.staticGroup();
 
-        const ground = this.add.rectangle(ROOM_WIDTH / 2, 740, ROOM_WIDTH, 56, 0x3a3a4a);
-        platforms.add(ground);
-        this.platformRects.push(ground);
-
-        // An ascending staircase: each platform is one jump higher than the last, so only the
-        // first one is reachable straight from the ground - the rest require jumping platform-to-platform.
-        const floatingPlatformSpots: [x: number, y: number][] = [
-            [300, 650],
-            [700, 560],
-            [1100, 470],
-            [1500, 380],
-            [1900, 290]
-        ];
-        for (const [x, y] of floatingPlatformSpots) {
-            const platform = this.add.rectangle(x, y, 220, 32, 0x3a3a4a);
-            platforms.add(platform);
-            this.platformRects.push(platform);
+        this.ground = this.add.rectangle(ROOM_WIDTH / 2, 740, ROOM_WIDTH, 56, ROOM_TERRAINS[1].groundColor);
+        platforms.add(this.ground);
+        for (const [roomId, terrain] of Object.entries(ROOM_TERRAINS)) {
+            const roomNumber = Number(roomId);
+            this.roomPlatforms[roomNumber] = terrain.platforms.map(([x, y, width]) => {
+                const platform = this.add.rectangle(x, y, width, 32, terrain.platformColor);
+                platforms.add(platform);
+                return platform;
+            });
         }
+        this.setRoomTerrain(this.roomNumber);
 
-        this.player = this.add.rectangle(100, 600, stageStats.width, stageStats.height, 0xe0e0e0);
+        this.player = this.add.rectangle(100, 600, stageStats.width, stageStats.height, PLAYER_COLORS[this.lifeStage]);
+        this.playerDetails = this.add.graphics();
+        this.drawPlayerAppearance();
         this.physics.add.existing(this.player); // gives the rectangle a physics body, so gravity and velocity apply to it
 
         const playerBody = this.player.body as Phaser.Physics.Arcade.Body;
@@ -219,8 +267,8 @@ export class Game extends Scene
 
         this.physics.add.collider(this.player, platforms);
 
-        // Camera follows the player but won't scroll past the room bounds set above.
-        this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
+        this.cameras.main.stopFollow();
+        this.cameras.main.centerOn(ROOM_WIDTH / 2, ROOM_HEIGHT / 2);
 
         this.cursors = this.input.keyboard!.addKeys({
             up: Input.Keyboard.KeyCodes.W,
@@ -236,7 +284,7 @@ export class Game extends Scene
         this.spawnRoomEnemies();
 
         const panel = this.add.rectangle(148, 44, 284, 82, 0x111827, 0.8);
-        this.uiTitle = this.add.text(16, 8, `${this.lifeStage.toUpperCase()}  RUN  |  ROOM 1`, {
+        this.uiTitle = this.add.text(16, 8, `${this.lifeStage.toUpperCase()}  RUN  |  ROOM 1 / ${ROOM_COUNT}`, {
             fontFamily: 'Arial',
             fontSize: '14px',
             color: '#e5e7eb',
@@ -277,6 +325,7 @@ export class Game extends Scene
         this.targetLine = this.add.graphics();
 
         this.input.keyboard?.on('keydown', (event: KeyboardEvent) => {
+            this.unlockAudio();
             if (!this.skillSelectionOpen) {
                 return;
             }
@@ -291,11 +340,12 @@ export class Game extends Scene
 
     spawnRoomEnemies (): void
     {
-        const enemySpots: [x: number, y: number][] = [
-            [900, 700],
-            [1400, 700],
-            [2000, 700]
-        ];
+        const roomSpots: Record<number, [x: number, y: number][]> = {
+            1: [[250, 700], [512, 700], [774, 700]],
+            2: [[300, 700], [512, 700], [724, 700]],
+            3: [[220, 700], [512, 700], [804, 700]]
+        };
+        const enemySpots = roomSpots[this.roomNumber] ?? roomSpots[ROOM_COUNT];
         for (const [x, y] of enemySpots) {
             const body = this.add.rectangle(x, y, 40, 40, ENEMY_COLOR);
             this.physics.add.existing(body);
@@ -303,8 +353,10 @@ export class Game extends Scene
             bodyPhysics.setImmovable(true);
             bodyPhysics.setAllowGravity(false);
 
+            const details = this.add.graphics();
+
             const healthBar = this.add.graphics();
-            const healthText = this.add.text(x, y - 32, `${ENEMY_MAX_HEALTH}`, {
+            const healthText = this.add.text(x, y - 46, `${ENEMY_MAX_HEALTH}`, {
                 fontFamily: 'Arial',
                 fontSize: '12px',
                 color: '#ffffff',
@@ -315,6 +367,11 @@ export class Game extends Scene
 
             const enemy: Enemy = {
                 body,
+                details,
+                patrolLeft: Math.max(65, x - 82),
+                patrolRight: Math.min(ROOM_WIDTH - 65, x + 82),
+                moveDirection: Math.random() < 0.5 ? -1 : 1,
+                moveSpeed: 55 + this.roomNumber * 12,
                 health: ENEMY_MAX_HEALTH,
                 maxHealth: ENEMY_MAX_HEALTH,
                 damage: ENEMY_DAMAGE,
@@ -323,8 +380,117 @@ export class Game extends Scene
                 healthText
             };
 
+            this.drawEnemyDetails(enemy);
             this.updateEnemyHealthBar(enemy);
             this.enemies.push(enemy);
+        }
+    }
+
+    drawEnemyDetails (enemy: Enemy): void
+    {
+        const { x, y } = enemy.body;
+        const details = enemy.details;
+        details.clear();
+        details.fillStyle(0x32121b, 1);
+        details.fillTriangle(x - 14, y - 14, x - 21, y - 31, x - 5, y - 23);
+        details.fillTriangle(x + 14, y - 14, x + 21, y - 31, x + 5, y - 23);
+        details.fillTriangle(x - 18, y + 1, x - 26, y - 7, x - 19, y - 12);
+        details.fillTriangle(x + 18, y + 1, x + 26, y - 7, x + 19, y - 12);
+        details.fillStyle(0xffd166, 1);
+        details.fillCircle(x - 8, y - 5, 5);
+        details.fillCircle(x + 8, y - 5, 5);
+        details.fillStyle(0x190d12, 1);
+        details.fillCircle(x - 8, y - 5, 2);
+        details.fillCircle(x + 8, y - 5, 2);
+        details.fillRect(x - 11, y + 7, 22, 9);
+        details.fillStyle(0xf7e6ce, 1);
+        details.fillTriangle(x - 8, y + 7, x - 3, y + 7, x - 6, y + 13);
+        details.fillTriangle(x - 1, y + 7, x + 4, y + 7, x + 1, y + 13);
+        details.fillTriangle(x + 6, y + 7, x + 10, y + 7, x + 8, y + 12);
+    }
+
+    updateEnemyMovement (enemy: Enemy, delta: number): void
+    {
+        const nextX = enemy.body.x + enemy.moveDirection * enemy.moveSpeed * (delta / 1000);
+        if (nextX <= enemy.patrolLeft || nextX >= enemy.patrolRight) {
+            enemy.moveDirection *= -1;
+        }
+
+        enemy.body.x = Math.max(enemy.patrolLeft, Math.min(enemy.patrolRight, nextX));
+        this.drawEnemyDetails(enemy);
+    }
+
+    setRoomTerrain (roomNumber: number): void
+    {
+        const terrain = ROOM_TERRAINS[roomNumber];
+        this.cameras.main.setBackgroundColor(terrain.backgroundColor);
+        this.ground.setFillStyle(terrain.groundColor);
+        this.platformRects = [this.ground];
+
+        for (const [platformRoomId, roomPlatforms] of Object.entries(this.roomPlatforms)) {
+            const active = Number(platformRoomId) === roomNumber;
+            for (const platform of roomPlatforms) {
+                platform.setVisible(active);
+                (platform.body as Phaser.Physics.Arcade.StaticBody).enable = active;
+                if (active) {
+                    this.platformRects.push(platform);
+                }
+            }
+        }
+    }
+
+    drawPlayerAppearance (): void
+    {
+        const x = this.player.x;
+        const y = this.player.y;
+        const halfWidth = this.player.width / 2;
+        const halfHeight = this.player.height / 2;
+        const top = y - halfHeight;
+        const eyeY = y - halfHeight * 0.12;
+        const eyeOffset = Math.min(9, halfWidth * 0.34);
+        const details = this.playerDetails;
+
+        details.clear();
+
+        if (this.lifeStage === 'Baby') {
+            details.fillStyle(0x493126, 1);
+            details.fillCircle(x, top + 5, 4);
+            details.fillTriangle(x - 2, top + 7, x + 2, top - 2, x + 6, top + 7);
+        } else if (this.lifeStage === 'Teen') {
+            details.fillStyle(0x202427, 1);
+            details.fillRect(x - halfWidth * 0.4, top + 3, halfWidth * 0.8, 6);
+            details.fillTriangle(x - 5, top + 6, x, top - 4, x + 2, top + 7);
+        } else {
+            details.fillStyle(0x313946, 1);
+            details.fillRect(x - halfWidth * 0.42, top + 4, halfWidth * 0.84, 8);
+            details.fillTriangle(x - 5, top + 5, x, top - 5, x + 5, top + 5);
+            details.fillTriangle(x - halfWidth, y - 4, x - halfWidth - 5, y + 7, x - halfWidth + 5, y + 9);
+            details.fillTriangle(x + halfWidth, y - 4, x + halfWidth + 5, y + 7, x + halfWidth - 5, y + 9);
+        }
+
+        details.fillStyle(this.lifeStage === 'Adult' ? 0x8be1d0 : 0xffe5ad, 1);
+        details.fillCircle(x - eyeOffset, eyeY, this.lifeStage === 'Baby' ? 3 : 2.5);
+        details.fillCircle(x + eyeOffset, eyeY, this.lifeStage === 'Baby' ? 3 : 2.5);
+        details.fillStyle(0x21191a, 1);
+        details.fillCircle(x - eyeOffset, eyeY, 1.5);
+        details.fillCircle(x + eyeOffset, eyeY, 1.5);
+
+        if (this.lifeStage === 'Baby') {
+            details.fillStyle(0xc97976, 0.8);
+            details.fillCircle(x - halfWidth * 0.55, eyeY + 6, 2);
+            details.fillCircle(x + halfWidth * 0.55, eyeY + 6, 2);
+            details.fillStyle(0x62b9b0, 1);
+            details.fillCircle(x, eyeY + 9, 3);
+            details.lineStyle(1, 0xe7e0c5, 1);
+            details.strokeCircle(x, eyeY + 9, 4);
+        } else if (this.lifeStage === 'Teen') {
+            details.fillStyle(0x263536, 1);
+            details.fillRect(x - halfWidth * 0.28, eyeY + 6, halfWidth * 0.56, 4);
+        } else {
+            details.fillStyle(0x313946, 1);
+            details.fillRect(x - halfWidth * 0.36, eyeY + 6, halfWidth * 0.72, 7);
+            details.fillStyle(0x8be1d0, 1);
+            details.fillRect(x - halfWidth * 0.24, eyeY + 8, halfWidth * 0.48, 2);
         }
     }
 
@@ -418,6 +584,7 @@ export class Game extends Scene
 
     handleSkillCardPointer (pointer: Phaser.Input.Pointer): void
     {
+        this.unlockAudio();
         if (!this.skillSelectionOpen || pointer.y < 290 || pointer.y > 520) {
             return;
         }
@@ -439,6 +606,7 @@ export class Game extends Scene
 
         const previousMaxHealth = this.playerStats.stats.maxHealth;
         this.playerStats.addSkill(selectedSkill);
+        this.playJuiceSound('pickup');
         const healthIncrease = this.playerStats.stats.maxHealth - previousMaxHealth;
         this.playerHealth = Math.min(this.playerStats.stats.maxHealth, this.playerHealth + healthIncrease);
         this.updatePlayerHealthBar();
@@ -457,10 +625,16 @@ export class Game extends Scene
 
     startNextRoom (): void
     {
+        if (this.roomNumber >= ROOM_COUNT) {
+            this.scene.start('GameOver', { victory: true });
+            return;
+        }
+
         this.roomNumber += 1;
+        this.setRoomTerrain(this.roomNumber);
         this.roomClearHandled = false;
         this.playerFireCooldown = this.playerStats.stats.fireRateMs;
-        this.uiTitle.setText(`${this.lifeStage.toUpperCase()}  RUN  |  ROOM ${this.roomNumber}`);
+        this.uiTitle.setText(`${this.lifeStage.toUpperCase()}  RUN  |  ROOM ${this.roomNumber} / ${ROOM_COUNT}`);
         this.spawnRoomEnemies();
         this.currentTarget = this.findNearestEnemy();
         this.updateTargetIndicator();
@@ -468,6 +642,17 @@ export class Game extends Scene
 
     update (_time: number, delta: number)
     {
+        if (this.hitStopRemaining > 0) {
+            this.hitStopRemaining -= delta;
+            if (this.hitStopRemaining <= 0) {
+                this.hitStopRemaining = 0;
+                this.physics.world.resume();
+            }
+            return;
+        }
+
+        this.updateImpactParticles(delta);
+        this.updateDamagePopups(delta);
         if (this.roomClearHandled) {
             return;
         }
@@ -493,13 +678,15 @@ export class Game extends Scene
             body.setVelocityY(JUMP_VELOCITY);
         }
 
+        this.drawPlayerAppearance();
+
         for (const enemy of this.enemies) {
+            this.updateEnemyMovement(enemy, delta);
             this.updateEnemyHealthBar(enemy);
             this.updateEnemyFire(enemy, delta);
         }
 
         this.updatePlayerHealthBar();
-        this.updateDamagePopups(delta);
         this.updatePickups(delta);
         this.handleEnemyContactDamage();
         this.checkPlayerDefeat();
@@ -568,6 +755,97 @@ export class Game extends Scene
                 this.damagePopups.splice(i, 1);
             }
         }
+    }
+
+    spawnImpactParticles (x: number, y: number, color: number, count: number, speed: number): void
+    {
+        for (let index = 0; index < count; index++) {
+            const angle = Math.random() * Math.PI * 2;
+            const particleSpeed = speed * (0.45 + Math.random() * 0.55);
+            const shape = this.add.circle(x, y, 2 + Math.random() * 2, color);
+            this.impactParticles.push({
+                shape,
+                velocityX: Math.cos(angle) * particleSpeed,
+                velocityY: Math.sin(angle) * particleSpeed,
+                ttl: 260,
+                maxTtl: 260
+            });
+        }
+    }
+
+    unlockAudio (): void
+    {
+        if (typeof AudioContext === 'undefined') {
+            return;
+        }
+
+        this.audioContext ??= new AudioContext();
+        if (this.audioContext.state === 'suspended') {
+            void this.audioContext.resume();
+        }
+    }
+
+    playJuiceSound (kind: 'hit' | 'kill' | 'hurt' | 'pickup'): void
+    {
+        const context = this.audioContext;
+        if (!context || context.state !== 'running') {
+            return;
+        }
+
+        const sounds = {
+            hit: { start: 190, end: 95, duration: 0.07, volume: 0.045, waveform: 'triangle' as OscillatorType },
+            kill: { start: 560, end: 260, duration: 0.15, volume: 0.055, waveform: 'square' as OscillatorType },
+            hurt: { start: 135, end: 55, duration: 0.14, volume: 0.07, waveform: 'sawtooth' as OscillatorType },
+            pickup: { start: 700, end: 920, duration: 0.06, volume: 0.035, waveform: 'sine' as OscillatorType }
+        };
+        const sound = sounds[kind];
+        const startTime = context.currentTime;
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+
+        oscillator.type = sound.waveform;
+        oscillator.frequency.setValueAtTime(sound.start, startTime);
+        oscillator.frequency.exponentialRampToValueAtTime(sound.end, startTime + sound.duration);
+        gain.gain.setValueAtTime(sound.volume, startTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, startTime + sound.duration);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(startTime);
+        oscillator.stop(startTime + sound.duration);
+    }
+
+    updateImpactParticles (delta: number): void
+    {
+        const deltaSeconds = delta / 1000;
+        for (let index = this.impactParticles.length - 1; index >= 0; index--) {
+            const particle = this.impactParticles[index];
+            particle.ttl -= delta;
+            if (particle.ttl <= 0) {
+                particle.shape.destroy();
+                this.impactParticles.splice(index, 1);
+                continue;
+            }
+
+            particle.velocityY += 260 * deltaSeconds;
+            particle.shape.x += particle.velocityX * deltaSeconds;
+            particle.shape.y += particle.velocityY * deltaSeconds;
+            particle.shape.setAlpha(particle.ttl / particle.maxTtl);
+            particle.shape.setScale(0.4 + 0.6 * (particle.ttl / particle.maxTtl));
+        }
+    }
+
+    triggerHitStop (duration: number): void
+    {
+        this.hitStopRemaining = Math.max(this.hitStopRemaining, duration);
+        this.physics.world.pause();
+    }
+
+    playPlayerDamageFeedback (): void
+    {
+        this.cameras.main.shake(160, 0.016);
+        this.spawnImpactParticles(this.player.x, this.player.y, 0xff6666, 12, 190);
+        this.playJuiceSound('hurt');
+        this.triggerHitStop(85);
     }
 
     hasLineOfSight (fromX: number, fromY: number, toX: number, toY: number): boolean
@@ -648,7 +926,8 @@ export class Game extends Scene
                 this.playerHealth = Math.max(0, this.playerHealth - enemy.damage);
                 this.contactDamageCooldown = PLAYER_DAMAGE_COOLDOWN_MS;
                 this.player.setFillStyle(0xff6666);
-                this.time.delayedCall(120, () => this.player.setFillStyle(0xe0e0e0));
+                this.playPlayerDamageFeedback();
+                this.time.delayedCall(120, () => this.player.setFillStyle(PLAYER_COLORS[this.lifeStage]));
                 this.updatePlayerHealthBar();
                 this.checkPlayerDefeat();
                 return;
@@ -662,7 +941,7 @@ export class Game extends Scene
         const barHeight = 6;
         const healthRatio = Math.max(0, Math.min(1, enemy.health / enemy.maxHealth));
         const x = enemy.body.x;
-        const y = enemy.body.y - 28;
+        const y = enemy.body.y - 42;
 
         enemy.healthBar.clear();
         enemy.healthBar.fillStyle(0x000000, 0.8);
@@ -725,6 +1004,9 @@ export class Game extends Scene
         }
 
         const isXp = pickup.type === 'xp';
+        if (isXp && !this.roomClearHandled) {
+            this.playJuiceSound('pickup');
+        }
         const popupMessage = isXp ? `+${pickup.value} XP` : `+${pickup.value} Coin`;
         const popup = this.add.text(this.player.x, this.player.y - 34, popupMessage, {
             fontFamily: 'Arial',
@@ -741,7 +1023,12 @@ export class Game extends Scene
     damageEnemy (enemy: Enemy, damage: number)
     {
         enemy.health = Math.max(0, enemy.health - damage);
+        const killed = enemy.health <= 0;
         enemy.body.setFillStyle(0xff8a66);
+        this.cameras.main.shake(killed ? 130 : 55, killed ? 0.012 : 0.004);
+        this.spawnImpactParticles(enemy.body.x, enemy.body.y, killed ? 0xffd166 : 0xff8a66, killed ? 14 : 7, killed ? 220 : 150);
+        this.playJuiceSound(killed ? 'kill' : 'hit');
+        this.triggerHitStop(killed ? 80 : 45);
         this.updateEnemyHealthBar(enemy);
 
         const popup = this.add.text(enemy.body.x, enemy.body.y - 52, `-${damage}`, {
@@ -757,6 +1044,7 @@ export class Game extends Scene
         if (enemy.health <= 0) {
             this.spawnEnemyDrops(enemy.body.x, enemy.body.y);
             enemy.body.destroy();
+            enemy.details.destroy();
             enemy.healthBar.destroy();
             enemy.healthText.destroy();
             this.enemies = this.enemies.filter((candidate) => candidate !== enemy);
@@ -863,7 +1151,8 @@ export class Game extends Scene
                 if (hitPlayer) {
                     this.playerHealth = Math.max(0, this.playerHealth - bullet.damage);
                     this.player.setFillStyle(0xff6666);
-                    this.time.delayedCall(120, () => this.player.setFillStyle(0xe0e0e0));
+                    this.playPlayerDamageFeedback();
+                    this.time.delayedCall(120, () => this.player.setFillStyle(PLAYER_COLORS[this.lifeStage]));
                     this.checkPlayerDefeat();
                 }
                 bullet.shape.destroy();
