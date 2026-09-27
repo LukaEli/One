@@ -42,6 +42,12 @@ type DamagePopup = {
     ttl: number;
 };
 
+type Pickup = {
+    shape: Phaser.GameObjects.Arc;
+    type: 'xp' | 'coin';
+    value: number;
+};
+
 function distanceSquared (ax: number, ay: number, bx: number, by: number): number
 {
     const dx = bx - ax;
@@ -99,9 +105,12 @@ export class Game extends Scene
     playerHealthText: Phaser.GameObjects.Text;
     uiContainer: Phaser.GameObjects.Container;
     uiHpLabel: Phaser.GameObjects.Text;
+    playerXp: number = 0;
+    playerCoins: number = 0;
 
     enemies: Enemy[] = [];
     bullets: Bullet[] = [];
+    pickups: Pickup[] = [];
     platformRects: Phaser.GameObjects.Rectangle[] = [];
     damagePopups: DamagePopup[] = [];
 
@@ -115,6 +124,17 @@ export class Game extends Scene
 
     create ()
     {
+        this.playerHealth = PLAYER_MAX_HEALTH;
+        this.playerDamageCooldown = 0;
+        this.playerXp = 0;
+        this.playerCoins = 0;
+        this.enemies = [];
+        this.bullets = [];
+        this.pickups = [];
+        this.platformRects = [];
+        this.damagePopups = [];
+        this.currentTarget = undefined;
+
         this.cameras.main.setBackgroundColor(0x1d1d2b);
 
         // A room is bigger than the screen, so both the physics world and the camera need to know its real size -
@@ -211,9 +231,9 @@ export class Game extends Scene
             strokeThickness: 3,
             fontStyle: 'bold'
         });
-        this.uiHpLabel = this.add.text(20, 34, `HP ${this.playerHealth}/${PLAYER_MAX_HEALTH}`, {
+        this.uiHpLabel = this.add.text(20, 34, `HP ${this.playerHealth}/${PLAYER_MAX_HEALTH}  XP ${this.playerXp}  C ${this.playerCoins}`, {
             fontFamily: 'Arial',
-            fontSize: '16px',
+            fontSize: '14px',
             color: '#ffffff',
             stroke: '#000000',
             strokeThickness: 4,
@@ -273,7 +293,9 @@ export class Game extends Scene
 
         this.updatePlayerHealthBar();
         this.updateDamagePopups(delta);
+        this.updatePickups(delta);
         this.handleEnemyContactDamage();
+        this.checkPlayerDefeat();
         this.updateTargetIndicator();
         this.updateBullets(delta);
     }
@@ -296,7 +318,14 @@ export class Game extends Scene
 
         this.playerHealthText.setPosition(x, y - 12);
         this.playerHealthText.setText(`${this.playerHealth}`);
-        this.uiHpLabel.setText(`HP ${this.playerHealth}/${PLAYER_MAX_HEALTH}`);
+        this.uiHpLabel.setText(`HP ${this.playerHealth}/${PLAYER_MAX_HEALTH} • XP ${this.playerXp} • Coins ${this.playerCoins}`);
+    }
+
+    checkPlayerDefeat ()
+    {
+        if (this.playerHealth <= 0 && this.scene.isActive('Game')) {
+            this.scene.start('GameOver');
+        }
     }
 
     updateDamagePopups (delta: number)
@@ -393,6 +422,7 @@ export class Game extends Scene
                 this.playerDamageCooldown = PLAYER_DAMAGE_COOLDOWN_MS;
                 this.player.setFillStyle(0xff6666);
                 this.time.delayedCall(120, () => this.player.setFillStyle(0xe0e0e0));
+                this.checkPlayerDefeat();
                 return;
             }
         }
@@ -418,6 +448,56 @@ export class Game extends Scene
         enemy.healthText.setText(`${enemy.health}`);
     }
 
+    spawnEnemyDrops (x: number, y: number)
+    {
+        const xp = this.add.circle(x, y, 6, 0x34d399).setStrokeStyle(2, 0xd1fae5, 1);
+        const coin = this.add.circle(x + 9, y - 4, 4, 0xfacc15).setStrokeStyle(2, 0xfef3c7, 1);
+
+        this.pickups.push({ shape: xp, type: 'xp', value: 10 });
+        this.pickups.push({ shape: coin, type: 'coin', value: 1 });
+    }
+
+    updatePickups (delta: number)
+    {
+        const deltaSeconds = delta / 1000;
+
+        for (let i = this.pickups.length - 1; i >= 0; i--) {
+            const pickup = this.pickups[i];
+            const dx = this.player.x - pickup.shape.x;
+            const dy = this.player.y - pickup.shape.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (distance < 140) {
+                const pullStrength = 260 * deltaSeconds;
+                pickup.shape.x += (dx / Math.max(distance, 1)) * pullStrength;
+                pickup.shape.y += (dy / Math.max(distance, 1)) * pullStrength;
+            }
+
+            if (distance < 22) {
+                if (pickup.type === 'xp') {
+                    this.playerXp += pickup.value;
+                } else {
+                    this.playerCoins += pickup.value;
+                }
+
+                const popupMessage = pickup.type === 'xp' ? '+10 XP' : '+1 Coin';
+                const popup = this.add.text(this.player.x, this.player.y - 34, popupMessage, {
+                    fontFamily: 'Arial',
+                    fontSize: '12px',
+                    color: pickup.type === 'xp' ? '#b7f7d0' : '#fde68a',
+                    stroke: '#000000',
+                    strokeThickness: 3,
+                    fontStyle: 'bold'
+                }).setOrigin(0.5);
+                this.damagePopups.push({ text: popup, ttl: 320 });
+
+                pickup.shape.destroy();
+                this.pickups.splice(i, 1);
+                this.updatePlayerHealthBar();
+            }
+        }
+    }
+
     damageEnemy (enemy: Enemy)
     {
         enemy.health -= 1;
@@ -435,6 +515,7 @@ export class Game extends Scene
         this.damagePopups.push({ text: popup, ttl: 350 });
 
         if (enemy.health <= 0) {
+            this.spawnEnemyDrops(enemy.body.x, enemy.body.y);
             enemy.body.destroy();
             enemy.healthBar.destroy();
             enemy.healthText.destroy();
@@ -544,6 +625,7 @@ export class Game extends Scene
                     this.playerDamageCooldown = PLAYER_DAMAGE_COOLDOWN_MS;
                     this.player.setFillStyle(0xff6666);
                     this.time.delayedCall(120, () => this.player.setFillStyle(0xe0e0e0));
+                    this.checkPlayerDefeat();
                 }
                 bullet.shape.destroy();
                 this.bullets.splice(i, 1);
