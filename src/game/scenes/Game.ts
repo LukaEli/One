@@ -49,6 +49,35 @@ function distanceSquared (ax: number, ay: number, bx: number, by: number): numbe
     return dx * dx + dy * dy;
 }
 
+function lineIntersectsRect (ax: number, ay: number, bx: number, by: number, rect: Phaser.Geom.Rectangle): boolean
+{
+    const dx = bx - ax;
+    const dy = by - ay;
+    let tMin = 0;
+    let tMax = 1;
+
+    const checks: Array<[number, number]> = [
+        [-dx, ax - rect.left],
+        [dx, rect.right - ax],
+        [-dy, ay - rect.top],
+        [dy, rect.bottom - ay]
+    ];
+
+    for (const [p, q] of checks) {
+        if (p === 0 && q < 0) {
+            return false;
+        }
+
+        if (p < 0) {
+            tMin = Math.max(tMin, q / p);
+        } else if (p > 0) {
+            tMax = Math.min(tMax, q / p);
+        }
+    }
+
+    return tMin <= tMax;
+}
+
 type MovementKeys = Phaser.Types.Input.Keyboard.CursorKeys & {
     up: Phaser.Input.Keyboard.Key;
     left: Phaser.Input.Keyboard.Key;
@@ -285,6 +314,24 @@ export class Game extends Scene
         }
     }
 
+    hasLineOfSight (fromX: number, fromY: number, toX: number, toY: number): boolean
+    {
+        for (const platform of this.platformRects) {
+            const bounds = platform.getBounds();
+            if (lineIntersectsRect(fromX, fromY, toX, toY, bounds)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    isOnScreen (x: number, y: number): boolean
+    {
+        const cameraBounds = this.cameras.main.worldView;
+        return cameraBounds.contains(x, y);
+    }
+
     isEnemyVisible (enemy: Enemy): boolean
     {
         const cameraBounds = this.cameras.main.worldView;
@@ -405,8 +452,10 @@ export class Game extends Scene
         enemy.fireCooldown -= delta;
         const distanceToPlayer = distanceSquared(enemy.body.x, enemy.body.y, this.player.x, this.player.y);
         const visibleAndInRange = distanceToPlayer <= 700 * 700;
+        const canSeePlayer = this.hasLineOfSight(enemy.body.x, enemy.body.y, this.player.x, this.player.y);
+        const bothVisible = this.isOnScreen(enemy.body.x, enemy.body.y) && this.isOnScreen(this.player.x, this.player.y);
 
-        if (enemy.fireCooldown > 0 || !visibleAndInRange) {
+        if (enemy.fireCooldown > 0 || !visibleAndInRange || !canSeePlayer || !bothVisible) {
             return;
         }
 
@@ -425,6 +474,17 @@ export class Game extends Scene
     {
         const target = this.currentTarget;
         if (!target) {
+            return;
+        }
+
+        const canSeeTarget = this.hasLineOfSight(this.player.x, this.player.y, target.body.x, target.body.y);
+        const bothVisible = this.isOnScreen(this.player.x, this.player.y) && this.isOnScreen(target.body.x, target.body.y);
+        if (!canSeeTarget || !bothVisible) {
+            return;
+        }
+
+        const distanceToTarget = distanceSquared(this.player.x, this.player.y, target.body.x, target.body.y);
+        if (distanceToTarget > 700 * 700) {
             return;
         }
 
