@@ -35,7 +35,7 @@ export class GameOver extends Scene
         }).setOrigin(0.5);
 
         this.addActionButton(512, 460, 'Restart Run', 0x34d399, () => {
-            this.scene.start('Game');
+            this.scene.start('Game', { lifeStage: this.registry.get('lifeStage') });
         });
 
         this.addActionButton(512, 525, 'Main Menu', 0x475569, () => {
@@ -43,7 +43,7 @@ export class GameOver extends Scene
         });
 
         this.input.keyboard?.once('keydown-SPACE', () => {
-            this.scene.start('Game');
+            this.scene.start('Game', { lifeStage: this.registry.get('lifeStage') });
         });
 
         this.input.keyboard?.once('keydown-M', () => {

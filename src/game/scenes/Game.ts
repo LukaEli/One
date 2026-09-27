@@ -17,6 +17,15 @@ const ENEMY_DAMAGE = 1;
 
 const ENEMY_COLOR = 0xd94f4f;
 const TARGET_COLOR = 0xffa53c; // highlight for whichever enemy is currently being aimed at
+const BATTLE_XP_TO_PICK = 30;
+
+export type LifeStage = 'Baby' | 'Teen' | 'Adult';
+
+const LIFE_STAGE_STATS: Record<LifeStage, { width: number; height: number; moveSpeed: number; damage: number }> = {
+    Baby: { width: 30, height: 42, moveSpeed: 240, damage: 1 },
+    Teen: { width: 40, height: 60, moveSpeed: 200, damage: 2 },
+    Adult: { width: 52, height: 72, moveSpeed: 170, damage: 3 }
+};
 
 // A bullet is just a shape that moves at a fixed velocity - no physics body needed for a straight line.
 type Bullet = {
@@ -99,12 +108,18 @@ export class Game extends Scene
 {
     player: Phaser.GameObjects.Rectangle;
     cursors: MovementKeys;
+    lifeStage: LifeStage = 'Teen';
+    playerMoveSpeed: number = MOVE_SPEED;
+    playerDamage: number = 2;
     playerHealth: number = PLAYER_MAX_HEALTH;
     contactDamageCooldown: number = 0;
     playerHealthBar: Phaser.GameObjects.Graphics;
     playerHealthText: Phaser.GameObjects.Text;
     uiContainer: Phaser.GameObjects.Container;
     uiHpLabel: Phaser.GameObjects.Text;
+    xpBar: Phaser.GameObjects.Graphics;
+    xpProgress: number = 0;
+    bankedSkillPicks: number = 0;
     playerXp: number = 0;
     playerCoins: number = 0;
 
@@ -122,10 +137,20 @@ export class Game extends Scene
         super('Game');
     }
 
+    init (data: { lifeStage?: LifeStage })
+    {
+        this.lifeStage = data.lifeStage ?? 'Teen';
+        const stats = LIFE_STAGE_STATS[this.lifeStage];
+        this.playerMoveSpeed = stats.moveSpeed;
+        this.playerDamage = stats.damage;
+    }
+
     create ()
     {
         this.playerHealth = PLAYER_MAX_HEALTH;
         this.contactDamageCooldown = 0;
+        this.xpProgress = 0;
+        this.bankedSkillPicks = 0;
         this.playerXp = 0;
         this.playerCoins = 0;
         this.enemies = [];
@@ -164,7 +189,8 @@ export class Game extends Scene
             this.platformRects.push(platform);
         }
 
-        this.player = this.add.rectangle(100, 600, 40, 60, 0xe0e0e0);
+        const stageStats = LIFE_STAGE_STATS[this.lifeStage];
+        this.player = this.add.rectangle(100, 600, stageStats.width, stageStats.height, 0xe0e0e0);
         this.physics.add.existing(this.player); // gives the rectangle a physics body, so gravity and velocity apply to it
 
         const playerBody = this.player.body as Phaser.Physics.Arcade.Body;
@@ -222,8 +248,8 @@ export class Game extends Scene
             this.enemies.push(enemy);
         }
 
-        const panel = this.add.rectangle(110, 42, 200, 70, 0x111827, 0.8);
-        const title = this.add.text(20, 16, 'PLAYER', {
+        const panel = this.add.rectangle(148, 44, 284, 82, 0x111827, 0.8);
+        const title = this.add.text(16, 8, `${this.lifeStage.toUpperCase()}  RUN`, {
             fontFamily: 'Arial',
             fontSize: '14px',
             color: '#e5e7eb',
@@ -231,15 +257,24 @@ export class Game extends Scene
             strokeThickness: 3,
             fontStyle: 'bold'
         });
-        this.uiHpLabel = this.add.text(20, 34, `HP ${this.playerHealth}/${PLAYER_MAX_HEALTH}  XP ${this.playerXp}  C ${this.playerCoins}`, {
+        this.uiHpLabel = this.add.text(16, 28, '', {
             fontFamily: 'Arial',
-            fontSize: '14px',
+            fontSize: '12px',
             color: '#ffffff',
             stroke: '#000000',
             strokeThickness: 4,
             fontStyle: 'bold'
         });
-        this.uiContainer = this.add.container(18, 12, [panel, title, this.uiHpLabel]);
+        this.xpBar = this.add.graphics();
+        const pickLabel = this.add.text(238, 55, '', {
+            fontFamily: 'Arial',
+            fontSize: '11px',
+            color: '#b7f7d0',
+            stroke: '#000000',
+            strokeThickness: 3,
+            fontStyle: 'bold'
+        }).setName('banked-picks');
+        this.uiContainer = this.add.container(12, 10, [panel, title, this.uiHpLabel, this.xpBar, pickLabel]).setScrollFactor(0);
 
         this.playerHealthBar = this.add.graphics();
         this.playerHealthText = this.add.text(this.player.x, this.player.y - 46, `${this.playerHealth}`, {
@@ -273,9 +308,9 @@ export class Game extends Scene
         const jumpPressed = Input.Keyboard.JustDown(this.cursors.up) || Input.Keyboard.JustDown(this.cursors.arrowUp);
 
         if (leftHeld) {
-            body.setVelocityX(-MOVE_SPEED);
+            body.setVelocityX(-this.playerMoveSpeed);
         } else if (rightHeld) {
-            body.setVelocityX(MOVE_SPEED);
+            body.setVelocityX(this.playerMoveSpeed);
         } else {
             body.setVelocityX(0);
         }
@@ -318,7 +353,16 @@ export class Game extends Scene
 
         this.playerHealthText.setPosition(x, y - 12);
         this.playerHealthText.setText(`${this.playerHealth}`);
-        this.uiHpLabel.setText(`HP ${this.playerHealth}/${PLAYER_MAX_HEALTH} • XP ${this.playerXp} • Coins ${this.playerCoins}`);
+        this.uiHpLabel.setText(`HP ${this.playerHealth}/${PLAYER_MAX_HEALTH}   Coins ${this.playerCoins}`);
+        this.xpBar.clear();
+        this.xpBar.fillStyle(0x030712, 0.95);
+        this.xpBar.fillRect(16, 55, 210, 10);
+        this.xpBar.fillStyle(0x34d399, 1);
+        this.xpBar.fillRect(16, 55, 210 * (this.xpProgress / BATTLE_XP_TO_PICK), 10);
+        this.xpBar.lineStyle(1, 0xd1fae5, 0.8);
+        this.xpBar.strokeRect(16, 55, 210, 10);
+        const pickLabel = this.uiContainer.getByName('banked-picks') as Phaser.GameObjects.Text;
+        pickLabel.setText(`PICKS ${this.bankedSkillPicks}`);
     }
 
     checkPlayerDefeat ()
@@ -477,6 +521,11 @@ export class Game extends Scene
             if (distance < 22) {
                 if (pickup.type === 'xp') {
                     this.playerXp += pickup.value;
+                    this.xpProgress += pickup.value;
+                    while (this.xpProgress >= BATTLE_XP_TO_PICK) {
+                        this.xpProgress -= BATTLE_XP_TO_PICK;
+                        this.bankedSkillPicks += 1;
+                    }
                 } else {
                     this.playerCoins += pickup.value;
                 }
@@ -499,13 +548,13 @@ export class Game extends Scene
         }
     }
 
-    damageEnemy (enemy: Enemy)
+    damageEnemy (enemy: Enemy, damage: number)
     {
-        enemy.health -= 1;
+        enemy.health = Math.max(0, enemy.health - damage);
         enemy.body.setFillStyle(0xff8a66);
         this.updateEnemyHealthBar(enemy);
 
-        const popup = this.add.text(enemy.body.x, enemy.body.y - 52, '-1', {
+        const popup = this.add.text(enemy.body.x, enemy.body.y - 52, `-${damage}`, {
             fontFamily: 'Arial',
             fontSize: '16px',
             color: '#ffb3b3',
@@ -578,7 +627,7 @@ export class Game extends Scene
             velocityX: Math.cos(angle) * BULLET_SPEED,
             velocityY: Math.sin(angle) * BULLET_SPEED,
             owner: 'player',
-            damage: 1
+            damage: this.playerDamage
         });
     }
 
@@ -611,7 +660,7 @@ export class Game extends Scene
                 }
 
                 if (hitEnemy) {
-                    this.damageEnemy(hitEnemy);
+                    this.damageEnemy(hitEnemy, bullet.damage);
                     bullet.shape.destroy();
                     this.bullets.splice(i, 1);
                 }
